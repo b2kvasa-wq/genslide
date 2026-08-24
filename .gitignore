@@ -2,8 +2,12 @@
 __pycache__/
 *.pyc
 
+# PyInstaller build & dist output binaries
+build/
+dist/
+
 # Temporary export folders
 temp_test_out/
 
-# Large model archives (downloaded separately)
+# Large model archives
 vosk-model-small-en-us-0.15.zip

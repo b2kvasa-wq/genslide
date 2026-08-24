@@ -31,6 +31,27 @@ import sounddevice as sd
 import numpy as np
 import speech_recognition as sr
 
+def get_resource_path(relative_path):
+    """Returns absolute path to resource, working for dev and PyInstaller bundle."""
+    if getattr(sys, 'frozen', False):
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    target_path = os.path.join(base_path, relative_path)
+    if os.path.exists(target_path):
+        return target_path
+    
+    cwd_path = os.path.join(os.getcwd(), relative_path)
+    if os.path.exists(cwd_path):
+        return cwd_path
+        
+    exe_dir_path = os.path.join(os.path.dirname(sys.executable), relative_path)
+    if os.path.exists(exe_dir_path):
+        return exe_dir_path
+        
+    return relative_path
+
 # Try importing win32com for native PowerPoint slide rendering
 try:
     import win32com.client
@@ -382,11 +403,14 @@ class VoiceSpeechEngine:
         """Initializes Vosk Local Real-Time Speech Model (<10ms Latency)."""
         try:
             import vosk
-            if os.path.exists(self.model_path):
-                self.vosk_model = vosk.Model(self.model_path)
+            resolved_path = get_resource_path(self.model_path)
+            if os.path.exists(resolved_path):
+                self.vosk_model = vosk.Model(resolved_path)
                 self.vosk_recognizer = vosk.KaldiRecognizer(self.vosk_model, 16000)
                 self.vosk_recognizer.SetWords(True)
-                print("[INFO] Vosk Sub-10ms Local Acoustic Engine Initialized Successfully!")
+                print(f"[INFO] Vosk Sub-10ms Local Acoustic Engine Initialized Successfully from: {resolved_path}")
+            else:
+                print(f"[WARN] Vosk model directory not found at: {resolved_path}")
         except Exception as e:
             print(f"[WARN] Local Vosk initialization skipped: {e}")
 
@@ -1452,9 +1476,16 @@ class PresentationApp(ctk.CTk):
             self.focus_set()
 
     def open_pptx_file(self):
-        """Opens native file dialog to load .pptx deck and export 100% REAL COLOURED PowerPoint slide renderings."""
+        """Opens native file dialog to load .pptx deck from local system or USB drive."""
         from tkinter import filedialog
-        file_path = filedialog.askopenfilename(filetypes=[("PowerPoint Presentations", "*.pptx")])
+        initial_dir = os.path.expanduser("~/Documents")
+        if not os.path.exists(initial_dir):
+            initial_dir = os.getcwd()
+        file_path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="Select PowerPoint Presentation Deck (.pptx)",
+            filetypes=[("PowerPoint Presentations", "*.pptx"), ("All Files", "*.*")]
+        )
         if file_path:
             if self.slide_mgr.load_pptx(file_path):
                 self.current_slide_idx = 0
