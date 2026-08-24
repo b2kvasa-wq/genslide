@@ -1,0 +1,9 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Temporary export folders
+temp_test_out/
+
+# Large model archives (downloaded separately)
+vosk-model-small-en-us-0.15.zip
