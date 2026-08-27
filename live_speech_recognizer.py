@@ -1,5 +1,43 @@
-import os
+# ======================================================================================
+# CRITICAL: Stream guards MUST be set BEFORE any library imports.
+# Native C libraries (sounddevice, vosk, numpy) check sys.stdout/stderr on import.
+# In PyInstaller --noconsole mode these are None, causing instant crashes.
+# ======================================================================================
 import sys
+import os
+
+class DummyWriter:
+    """Safe no-op writer for Windows PyInstaller frozen --noconsole mode."""
+    def write(self, s): pass
+    def flush(self): pass
+    def reconfigure(self, **kwargs): pass
+    def fileno(self): raise OSError("No underlying file descriptor")
+    def isatty(self): return False
+
+if sys.stdout is None:
+    sys.stdout = DummyWriter()
+if sys.stderr is None:
+    sys.stderr = DummyWriter()
+
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+# Redirect native C library output (vosk, portaudio) that bypasses Python streams
+if getattr(sys, 'frozen', False):
+    try:
+        import ctypes
+        _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        if sys.stdout is None or isinstance(sys.stdout, DummyWriter):
+            ctypes.cdll.msvcrt._dup2(_devnull_fd, 1)
+        if sys.stderr is None or isinstance(sys.stderr, DummyWriter):
+            ctypes.cdll.msvcrt._dup2(_devnull_fd, 2)
+    except Exception:
+        pass
+
+# Now safe to import all libraries
 import time
 import json
 import queue
@@ -12,12 +50,6 @@ import sounddevice as sd
 import vosk
 import numpy as np
 import speech_recognition as sr
-
-# Set UTF-8 encoding for Windows terminal
-try:
-    sys.stdout.reconfigure(encoding='utf-8')
-except Exception:
-    pass
 
 # Windows console non-blocking keyboard input
 try:
@@ -44,6 +76,31 @@ try:
     colorama.init()
 except Exception:
     pass
+
+
+def get_resource_path(relative_path):
+    """Returns absolute path to resource, working for dev and PyInstaller bundle."""
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            p = os.path.join(meipass, relative_path)
+            if os.path.exists(p):
+                return p
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        p_exe = os.path.join(exe_dir, relative_path)
+        if os.path.exists(p_exe):
+            return p_exe
+    try:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        target_path = os.path.join(base_path, relative_path)
+        if os.path.exists(target_path):
+            return target_path
+    except NameError:
+        pass
+    cwd_path = os.path.join(os.getcwd(), relative_path)
+    if os.path.exists(cwd_path):
+        return cwd_path
+    return relative_path
 
 class LiveSpeechRecognizer:
     def __init__(self, model_path="vosk-model-small-en-us-0.15", target_sample_rate=16000):
@@ -92,9 +149,10 @@ class LiveSpeechRecognizer:
     def load_model(self):
         """Loads Vosk local preview model and initializes Neural Speech Engine."""
         print(f"\n{Colors.OKCYAN}[INFO] Initializing REAL-TIME LIVE SPEECH ENGINE...{Colors.ENDC}")
-        if os.path.exists(self.model_path):
+        resolved_path = get_resource_path(self.model_path)
+        if os.path.exists(resolved_path):
             t0 = time.time()
-            self.vosk_model = vosk.Model(self.model_path)
+            self.vosk_model = vosk.Model(resolved_path)
             self.vosk_recognizer = vosk.KaldiRecognizer(self.vosk_model, self.target_sample_rate)
             self.vosk_recognizer.SetWords(True)
             print(f"{Colors.OKGREEN}[SUCCESS] Dual-Engine Speech System Ready in {time.time() - t0:.2f} seconds!{Colors.ENDC}")
@@ -548,5 +606,4 @@ class LiveSpeechRecognizer:
 
 if __name__ == "__main__":
     recognizer = LiveSpeechRecognizer()
-    recognizer.run()
     recognizer.run()

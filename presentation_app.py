@@ -6,8 +6,50 @@ Featuring Dynamic Responsive Font Scaling & Split-Screen Auto-Resizing UI Contai
 ========================================================================================
 """
 
-import os
+# ======================================================================================
+# CRITICAL: Stream guards MUST be set BEFORE any library imports.
+# Native C libraries (sounddevice, vosk, numpy) check sys.stdout/stderr on import.
+# In PyInstaller --noconsole mode these are None, causing instant crashes.
+# ======================================================================================
 import sys
+import os
+
+class DummyWriter:
+    """Safe no-op writer for Windows PyInstaller frozen --noconsole mode."""
+    def write(self, s): pass
+    def flush(self): pass
+    def reconfigure(self, **kwargs): pass
+    def fileno(self): raise OSError("No underlying file descriptor")
+    def isatty(self): return False
+
+if sys.stdout is None:
+    sys.stdout = DummyWriter()
+if sys.stderr is None:
+    sys.stderr = DummyWriter()
+
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+# Redirect native C library output (vosk, portaudio) that bypasses Python streams
+if getattr(sys, 'frozen', False):
+    try:
+        import ctypes
+        _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        if sys.stdout is None or isinstance(sys.stdout, DummyWriter):
+            ctypes.cdll.msvcrt._dup2(_devnull_fd, 1)  # redirect C stdout
+        if sys.stderr is None or isinstance(sys.stderr, DummyWriter):
+            ctypes.cdll.msvcrt._dup2(_devnull_fd, 2)  # redirect C stderr
+    except Exception:
+        pass
+
+import multiprocessing
+if getattr(sys, 'frozen', False):
+    multiprocessing.freeze_support()
+
+# Now safe to import all libraries
 import time
 import json
 import queue
@@ -31,25 +73,35 @@ import sounddevice as sd
 import numpy as np
 import speech_recognition as sr
 
+
 def get_resource_path(relative_path):
-    """Returns absolute path to resource, working for dev and PyInstaller bundle."""
+    """Returns absolute path to resource, working for dev and PyInstaller bundle.
+    Search order: _MEIPASS -> EXE directory -> __file__ directory -> CWD -> raw path.
+    """
+    # 1. PyInstaller bundle temp directory (_MEIPASS)
     if getattr(sys, 'frozen', False):
-        base_path = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-    else:
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            p = os.path.join(meipass, relative_path)
+            if os.path.exists(p):
+                return p
+        # 2. Directory where the .exe lives (for files placed alongside the EXE)
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        p_exe = os.path.join(exe_dir, relative_path)
+        if os.path.exists(p_exe):
+            return p_exe
+    # 3. Directory of this script file
+    try:
         base_path = os.path.dirname(os.path.abspath(__file__))
-    
-    target_path = os.path.join(base_path, relative_path)
-    if os.path.exists(target_path):
-        return target_path
-    
+        target_path = os.path.join(base_path, relative_path)
+        if os.path.exists(target_path):
+            return target_path
+    except NameError:
+        pass  # __file__ not defined in frozen mode
+    # 4. Current working directory
     cwd_path = os.path.join(os.getcwd(), relative_path)
     if os.path.exists(cwd_path):
         return cwd_path
-        
-    exe_dir_path = os.path.join(os.path.dirname(sys.executable), relative_path)
-    if os.path.exists(exe_dir_path):
-        return exe_dir_path
-        
     return relative_path
 
 # Try importing win32com for native PowerPoint slide rendering
@@ -75,8 +127,79 @@ COLOR_TEXT_MUTED = "#9CA3AF"
 COLOR_BORDER = "#1E293B"
 
 # Word Number Mappings for Dynamic Voice Slide Targeting
-NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"]
-ORDINAL_WORDS = ["zeroth", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth"]
+NUMBER_WORDS = [
+    "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    "twenty one", "twenty two", "twenty three", "twenty four", "twenty five", "twenty six", "twenty seven", "twenty eight", "twenty nine", "thirty",
+    "thirty one", "thirty two", "thirty three", "thirty four", "thirty five", "thirty six", "thirty seven", "thirty eight", "thirty nine", "forty",
+    "forty one", "forty two", "forty three", "forty four", "forty five", "forty six", "forty seven", "forty eight", "forty nine", "fifty"
+]
+
+ORDINAL_WORDS = [
+    "", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+    "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth",
+    "twenty first", "twenty second", "twenty third", "twenty fourth", "twenty fifth", "twenty sixth", "twenty seventh", "twenty eighth", "twenty ninth", "thirtieth"
+]
+
+# Robust word-to-number dictionary with phonetic homophones and common speech recognition variants
+NUMBER_MAP = {
+    'one': 1, 'first': 1, '1': 1, '1st': 1, 'won': 1,
+    'two': 2, 'second': 2, '2': 2, '2nd': 2, 'to': 2, 'too': 2,
+    'three': 3, 'third': 3, '3': 3, '3rd': 3, 'tree': 3,
+    'four': 4, 'fourth': 4, '4': 4, '4th': 4, 'for': 4, 'fore': 4,
+    'five': 5, 'fifth': 5, '5': 5, '5th': 5,
+    'six': 6, 'sixth': 6, '6': 6, '6th': 6,
+    'seven': 7, 'seventh': 7, '7': 7, '7th': 7,
+    'eight': 8, 'eighth': 8, '8': 8, '8th': 8, 'ate': 8,
+    'nine': 9, 'ninth': 9, '9': 9, '9th': 9,
+    'ten': 10, 'tenth': 10, '10': 10, '10th': 10,
+    'eleven': 11, 'eleventh': 11, '11': 11,
+    'twelve': 12, 'twelfth': 12, '12': 12,
+    'thirteen': 13, 'thirteenth': 13, '13': 13,
+    'fourteen': 14, 'fourteenth': 14, '14': 14,
+    'fifteen': 15, 'fifteenth': 15, '15': 15,
+    'sixteen': 16, 'sixteenth': 16, '16': 16,
+    'seventeen': 17, 'seventeenth': 17, '17': 17,
+    'eighteen': 18, 'eighteenth': 18, '18': 18,
+    'nineteen': 19, 'nineteenth': 19, '19': 19,
+    'twenty': 20, 'twentieth': 20, '20': 20,
+}
+
+NAV_COMMAND_PATTERNS = [
+    (re.compile(r'\b(next\s+slide|go\s+next|move\s+next|next\s+page|next|forward|advance)\b'), 'ACTION_NEXT'),
+    (re.compile(r'\b(previous\s+slide|prev\s+slide|go\s+back|move\s+back|previous\s+page|previous|prev|back)\b'), 'ACTION_PREV'),
+    (re.compile(r'\b(first\s+slide|start\s+over|beginning|initial\s+slide)\b'), 'ACTION_FIRST'),
+    (re.compile(r'\b(last\s+slide|end\s+of\s+presentation|conclusion\s+slide|final\s+slide)\b'), 'ACTION_LAST'),
+    (re.compile(r'\b(black\s+screen|blackout|black\s+out)\b'), 'ACTION_BLACKOUT'),
+    (re.compile(r'\b(white\s+screen|whiteout|white\s+out)\b'), 'ACTION_WHITEOUT'),
+]
+
+SLIDE_NUM_REGEX_1 = re.compile(r'\b(?:slide|page|number|deck)\s+([a-z0-9]+)\b')
+SLIDE_NUM_REGEX_2 = re.compile(r'\b([a-z0-9]+)\s+(?:slide|page)\b')
+
+# Pre-compiled regex for punctuation stripping (avoids recompiling every match call)
+_RE_PUNCT = re.compile(r'[^\w\s]')
+_RE_MULTI_SPACE = re.compile(r'\s+')
+
+# ======================================================================================
+# PRE-CACHED FONTS (loaded ONCE at startup, reused across all render calls)
+# ======================================================================================
+_FONT_CACHE = {}
+
+def _get_cached_font(size):
+    """Returns a cached ImageFont at the given size. Loads once, reuses forever."""
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    try:
+        _font_path = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', 'arial.ttf')
+        if os.path.exists(_font_path):
+            font = ImageFont.truetype(_font_path, size)
+        else:
+            font = ImageFont.truetype("arial.ttf", size)
+    except Exception:
+        font = ImageFont.load_default()
+    _FONT_CACHE[size] = font
+    return font
 
 
 # ======================================================================================
@@ -84,6 +207,8 @@ ORDINAL_WORDS = ["zeroth", "first", "second", "third", "fourth", "fifth", "sixth
 # ======================================================================================
 
 class SlideData:
+    __slots__ = ('slide_id', 'title', 'bullet_points', 'notes', 'image_path', 'keywords', 'slide_image', '_render_hash', '_cached_render')
+
     def __init__(self, slide_id, title="Untitled Slide", bullet_points=None, notes="", image_path=None, keywords=None, slide_image=None):
         self.slide_id = slide_id
         self.title = title
@@ -92,6 +217,12 @@ class SlideData:
         self.image_path = image_path
         self.keywords = keywords if keywords is not None else []
         self.slide_image = slide_image  # 100% Real Coloured PPT Slide PIL Image
+        self._render_hash = None  # Cache invalidation key
+        self._cached_render = None  # Cached PIL image
+
+    def _compute_hash(self):
+        """Fast hash of content that affects rendering."""
+        return hash((self.slide_id, self.title, tuple(self.bullet_points), self.image_path, tuple(self.keywords[:6])))
 
 
 class SlideManager:
@@ -168,7 +299,7 @@ class SlideManager:
             os.makedirs(out_folder, exist_ok=True)
 
             ppt_app = win32com.client.Dispatch("PowerPoint.Application")
-            presentation = ppt_app.Presentations.Open(abs_path, ReadOnly=True, Untitled=False, WithWindow=1)
+            presentation = ppt_app.Presentations.Open(abs_path, ReadOnly=True, Untitled=False, WithWindow=0)
 
             # Export All Slides as JPG/PNG (Format #17 = ppSaveAsPNG / JPG)
             presentation.SaveAs(out_folder, 17)
@@ -206,8 +337,9 @@ class SlideManager:
                 title = f"Slide {slide_num}"
                 bullet_points = []
                 notes = ""
+                extracted_img_path = None
                 
-                # Extract Title & Body Text
+                # Extract Title, Body Text, and Embedded Shape Images
                 for shape in slide.shapes:
                     if shape.has_text_frame:
                         text = shape.text.strip()
@@ -218,20 +350,46 @@ class SlideManager:
                                 for para in shape.text_frame.paragraphs:
                                     if para.text.strip():
                                         bullet_points.append(para.text.strip())
+                    
+                    # Extract embedded image blob if present
+                    if extracted_img_path is None and hasattr(shape, "image"):
+                        try:
+                            img_bytes = shape.image.blob
+                            ext = getattr(shape.image, "ext", "png")
+                            img_path = os.path.join(self.temp_dir, f"slide_{slide_num}_img.{ext}")
+                            with open(img_path, "wb") as img_file:
+                                img_file.write(img_bytes)
+                            extracted_img_path = img_path
+                        except Exception:
+                            pass
                                         
                 # Extract Notes
                 if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
                     notes = slide.notes_slide.notes_text_frame.text.strip()
                     
                 # Dynamic Voice Keywords adapted to slide numbers & title
-                keywords = [f"slide {slide_num}", f"slide{slide_num}"]
-                if slide_num < len(NUMBER_WORDS):
-                    keywords.append(NUMBER_WORDS[slide_num])
-                if slide_num < len(ORDINAL_WORDS):
-                    keywords.append(ORDINAL_WORDS[slide_num])
+                keywords = [f"slide {slide_num}", f"slide{slide_num}", f"page {slide_num}"]
+                if slide_num < len(NUMBER_WORDS) and NUMBER_WORDS[slide_num]:
+                    num_word = NUMBER_WORDS[slide_num]
+                    keywords.extend([num_word, f"slide {num_word}", f"page {num_word}"])
+                if slide_num < len(ORDINAL_WORDS) and ORDINAL_WORDS[slide_num]:
+                    ord_word = ORDINAL_WORDS[slide_num]
+                    keywords.extend([ord_word, f"{ord_word} slide", f"{ord_word} page"])
                     
-                title_kws = [w.lower() for w in title.split() if len(w) > 3]
+                # Add homophones for common numbers
+                if slide_num == 1:
+                    keywords.extend(["won", "slide won", "first slide"])
+                elif slide_num == 2:
+                    keywords.extend(["slide to", "slide too", "second slide"])
+                elif slide_num == 3:
+                    keywords.extend(["slide tree", "third slide"])
+                elif slide_num == 4:
+                    keywords.extend(["slide for", "slide fore", "fourth slide"])
+                    
+                title_kws = [w.lower() for w in title.split() if len(w) > 2 and w.lower() not in ["the", "and", "for", "with", "this", "that"]]
                 keywords.extend(title_kws)
+                if title:
+                    keywords.append(title.lower().strip())
                 
                 # Check for COM rendered 100% real PowerPoint slide image
                 com_img = com_rendered_images.get(idx, None)
@@ -241,6 +399,7 @@ class SlideManager:
                     title=title,
                     bullet_points=bullet_points[:6],
                     notes=notes,
+                    image_path=extracted_img_path,
                     keywords=list(set(keywords)),
                     slide_image=com_img
                 ))
@@ -295,54 +454,65 @@ class SlideManager:
             return False
 
     def render_slide_image(self, slide_data, width=1280, height=720):
-        """Returns the native 100% real PowerPoint slide image if available, else fallback canvas."""
+        """Returns cached slide image. Only re-renders when slide content actually changes."""
         if slide_data.slide_image is not None:
             return slide_data.slide_image
 
-        # Fallback Canvas Renderer
+        # Check cache — skip rendering if content hasn't changed
+        current_hash = slide_data._compute_hash()
+        if slide_data._cached_render is not None and slide_data._render_hash == current_hash:
+            return slide_data._cached_render
+
+        # Fallback Canvas Renderer — uses pre-cached fonts (zero font-loading overhead)
         img = Image.new("RGB", (width, height), COLOR_BG_CARD)
         draw = ImageDraw.Draw(img)
         
         draw.rectangle([0, 0, width, 12], fill=COLOR_SAPPHIRE)
         draw.rectangle([0, height - 8, width, height], fill=COLOR_SAPPHIRE)
         
-        try:
-            title_font = ImageFont.truetype("arial.ttf", int(height * 0.055))
-            body_font = ImageFont.truetype("arial.ttf", int(height * 0.035))
-            meta_font = ImageFont.truetype("arial.ttf", int(height * 0.025))
-        except Exception:
-            title_font = ImageFont.load_default()
-            body_font = ImageFont.load_default()
-            meta_font = ImageFont.load_default()
+        title_font = _get_cached_font(int(height * 0.055))
+        body_font = _get_cached_font(int(height * 0.035))
+        meta_font = _get_cached_font(int(height * 0.025))
 
-        badge_text = f"SLIDE #{slide_data.slide_id}"
-        draw.text((width * 0.05, height * 0.06), badge_text, fill=COLOR_SAPPHIRE, font=meta_font)
-        draw.text((width * 0.05, height * 0.12), slide_data.title, fill=COLOR_TEXT_WHITE, font=title_font)
-        draw.line([(width * 0.05, height * 0.22), (width * 0.95, height * 0.22)], fill=COLOR_BORDER, width=3)
+        # Pre-computed layout coordinates
+        x_margin = int(width * 0.05)
+        x_bullet_dot = int(width * 0.06)
+        x_bullet_text = int(width * 0.09)
+        y_badge = int(height * 0.06)
+        y_title = int(height * 0.12)
+        y_line = int(height * 0.22)
+        x_line_end = int(width * 0.95)
 
-        y_pos = height * 0.28
-        spacing = height * 0.09
+        draw.text((x_margin, y_badge), f"SLIDE #{slide_data.slide_id}", fill=COLOR_SAPPHIRE, font=meta_font)
+        draw.text((x_margin, y_title), slide_data.title, fill=COLOR_TEXT_WHITE, font=title_font)
+        draw.line([(x_margin, y_line), (x_line_end, y_line)], fill=COLOR_BORDER, width=3)
+
+        y_pos = int(height * 0.28)
+        spacing = int(height * 0.09)
         
         if slide_data.bullet_points:
             for bullet in slide_data.bullet_points:
-                draw.ellipse([width * 0.06, y_pos + 6, width * 0.06 + 12, y_pos + 18], fill=COLOR_SAPPHIRE)
-                draw.text((width * 0.09, y_pos), bullet, fill="#E2E8F0", font=body_font)
+                draw.ellipse([x_bullet_dot, y_pos + 6, x_bullet_dot + 12, y_pos + 18], fill=COLOR_SAPPHIRE)
+                draw.text((x_bullet_text, y_pos), bullet, fill="#E2E8F0", font=body_font)
                 y_pos += spacing
         else:
-            draw.text((width * 0.09, y_pos), "(Blank Slide Content)", fill=COLOR_TEXT_MUTED, font=body_font)
+            draw.text((x_bullet_text, y_pos), "(Blank Slide Content)", fill=COLOR_TEXT_MUTED, font=body_font)
 
         if slide_data.image_path and os.path.exists(slide_data.image_path):
             try:
                 sub_img = Image.open(slide_data.image_path)
-                sub_img.thumbnail((int(width * 0.35), int(height * 0.45)))
+                sub_img.thumbnail((int(width * 0.35), int(height * 0.45)), Image.Resampling.BILINEAR)
                 img.paste(sub_img, (int(width * 0.58), int(height * 0.32)))
             except Exception:
                 pass
 
         if slide_data.keywords:
             kw_str = "🔑 Voice Keywords: " + ", ".join([f'"{k}"' for k in slide_data.keywords[:6]])
-            draw.text((width * 0.05, height * 0.91), kw_str, fill="#64748B", font=meta_font)
+            draw.text((x_margin, int(height * 0.91)), kw_str, fill="#64748B", font=meta_font)
 
+        # Cache the rendered image
+        slide_data._render_hash = current_hash
+        slide_data._cached_render = img
         return img
 
 
@@ -379,8 +549,13 @@ class VoiceSpeechEngine:
         
         self.device_id = None
         self.device_name = ""
+        self.device_type = "MIC"
+        self.is_mic_connected = False
         self.native_sr = 44100
         self.channels = 1
+        self._last_device_signature = None
+        
+        self.probe_microphone()
         
         self.keywords_map = {}  # {keyword_str: slide_index}
         self.last_matched_keyword = ""
@@ -398,6 +573,13 @@ class VoiceSpeechEngine:
         self._x_orig_cache = None
         self._x_targ_cache = None
         self._last_sr_pair = (None, None)
+        
+        # Pre-sorted keyword caches (built once in set_keywords, reused every match)
+        self._sorted_keywords = []
+        self._keyword_patterns = {}
+        self._all_keywords_list = []
+        # Pre-computed VAD max buffer size (updated on start())
+        self._vad_max_bytes = 44100 * 2 * 2
 
     def init_vosk_model(self):
         """Initializes Vosk Local Real-Time Speech Model (<10ms Latency)."""
@@ -415,47 +597,261 @@ class VoiceSpeechEngine:
             print(f"[WARN] Local Vosk initialization skipped: {e}")
 
     def set_keywords(self, slides):
-        """Builds and re-indexes active keyword-to-slide-index mapping dictionary."""
+        """Builds keyword-to-slide mapping + pre-sorted keyword list + pre-compiled regex patterns."""
         mapping = {}
+        self._total_slides_count = len(slides)
         for idx, slide in enumerate(slides):
             for kw in slide.keywords:
-                clean_kw = re.sub(r'[^\w\s]', ' ', kw.strip().lower())
-                clean_kw = " ".join(clean_kw.split())
+                clean_kw = _RE_PUNCT.sub(' ', kw.strip().lower())
+                clean_kw = ' '.join(clean_kw.split())
                 if clean_kw:
                     mapping[clean_kw] = idx
         self.keywords_map = mapping
+        # Pre-sort keywords by length (longest first) — avoids sorting on every match call
+        self._sorted_keywords = sorted(mapping.keys(), key=len, reverse=True)
+        # Pre-compile word-boundary regex for each keyword
+        self._keyword_patterns = {kw: re.compile(r'\b' + re.escape(kw) + r'\b') for kw in self._sorted_keywords}
+        # Pre-build list for fuzzy matching
+        self._all_keywords_list = list(mapping.keys())
         return len(mapping)
 
-    def probe_microphone(self):
-        """Probes audio input devices and auto-selects active hardware mic."""
-        devices = sd.query_devices()
-        for idx, dev in enumerate(devices):
-            if dev['max_input_channels'] > 0:
-                name = dev['name']
-                is_virtual = any(k in name.lower() for k in ["camo", "mapper", "primary sound"])
-                if not is_virtual:
-                    self.device_id = idx
-                    self.device_name = name
-                    self.native_sr = int(dev['default_samplerate'])
-                    self.channels = min(dev['max_input_channels'], 2)
-                    return True
-        if devices:
-            self.device_id = 0
-            self.device_name = devices[0]['name']
-            self.native_sr = int(devices[0]['default_samplerate'])
-            self.channels = 1
+    def get_available_microphones(self):
+        """Scans and returns all physical and default audio input devices on the system."""
+        mic_list = []
+        try:
+            devices = sd.query_devices()
+            default_in = sd.default.device[0] if sd.default.device else None
+            
+            for idx, dev in enumerate(devices):
+                in_ch = dev.get('max_input_channels', 0)
+                if in_ch <= 0:
+                    continue
+                name = dev.get('name', f"Input Device #{idx}")
+                host_api_idx = dev.get('hostapi', 0)
+                try:
+                    host_api_name = sd.query_hostapis(host_api_idx).get('name', '')
+                except Exception:
+                    host_api_name = ""
+                    
+                sr = int(dev.get('default_samplerate', 44100))
+                
+                # Check for virtual loopback devices to filter out of auto-select
+                name_lower = name.lower()
+                is_virtual = any(skip in name_lower for skip in ['sound mapper', 'primary sound', 'stereo mix', 'speaker', 'loopback', 'cable', 'virtual', 'camo'])
+                
+                is_default = (idx == default_in)
+                mic_list.append({
+                    'id': idx,
+                    'name': name,
+                    'samplerate': sr,
+                    'channels': min(in_ch, 2),
+                    'api': host_api_name,
+                    'is_virtual': is_virtual,
+                    'is_default': is_default
+                })
+        except Exception as e:
+            print(f"[WARN] Failed to query audio devices: {e}")
+        return mic_list
+
+    def probe_microphone(self, force_device_id=None):
+        """Probes and dynamically selects the best available microphone (Prioritizes Bluetooth & USB)."""
+        try:
+            all_mics = self.get_available_microphones()
+            if not all_mics:
+                self.device_id = None
+                self.device_name = "No Input Device Detected"
+                self.device_type = "NONE"
+                self.is_mic_connected = False
+                return False
+
+            if force_device_id is not None:
+                for m in all_mics:
+                    if m['id'] == force_device_id:
+                        self.device_id = m['id']
+                        self.device_name = m['name']
+                        self.native_sr = m['samplerate']
+                        self.channels = m['channels']
+                        self.device_type = "BT" if any(k in m['name'].lower() for k in ['bluetooth', 'headset', 'buds', 'airpods', 'wireless']) else "MIC"
+                        self.is_mic_connected = True
+                        print(f"[INFO] Manually Selected Microphone #{self.device_id}: {self.device_name}")
+                        return True
+
+            bt_keywords = ['bluetooth', 'headset', 'hands-free', 'buds', 'airdopes', 'wireless', 'airpods', 'noise', 'boat', 'oneplus', 'mivi', 'realme', 'boult', 'jbl', 'sony', 'bose', 'sennheiser', 'jabber']
+            usb_keywords = ['usb', 'hyperx', 'blue yeti', 'rode', 'fifine', 'boya', 'podcast']
+
+            bt_candidates = []
+            usb_candidates = []
+            internal_candidates = []
+
+            for m in all_mics:
+                if m.get('is_virtual', False):
+                    continue
+                idx = m['id']
+                name = m['name']
+                name_lower = name.lower()
+                sr = m['samplerate']
+                ch = m['channels']
+                api_name = m.get('api', '').lower()
+
+                # Test if device can open and negotiate sample rate
+                can_open = False
+                tested_sr = sr
+                for test_sr in [sr, 16000, 44100, 48000, 8000]:
+                    try:
+                        s = sd.InputStream(samplerate=test_sr, channels=ch, dtype='int16', device=idx)
+                        s.start()
+                        s.stop()
+                        s.close()
+                        can_open = True
+                        tested_sr = test_sr
+                        break
+                    except Exception:
+                        pass
+
+                if not can_open:
+                    continue
+
+                info = dict(m)
+                info['samplerate'] = tested_sr
+
+                if any(k in name_lower for k in bt_keywords):
+                    # Prefer WASAPI (16kHz wideband) or DirectSound for Bluetooth
+                    api_score = 3 if 'wasapi' in api_name else (2 if 'directsound' in api_name else 1)
+                    bt_candidates.append((api_score, info))
+                elif any(k in name_lower for k in usb_keywords):
+                    api_score = 3 if 'wasapi' in api_name else (2 if 'directsound' in api_name else 1)
+                    usb_candidates.append((api_score, info))
+                else:
+                    api_score = 3 if 'wdm-ks' in api_name else (2 if 'wasapi' in api_name else 1)
+                    internal_candidates.append((api_score, info))
+
+            selected_info = None
+            selected_type = "MIC"
+
+            # 1. First Priority: Active Bluetooth / Wireless Headset
+            if bt_candidates:
+                bt_candidates.sort(key=lambda x: x[0], reverse=True)
+                selected_info = bt_candidates[0][1]
+                selected_type = "BT"
+            # 2. Second Priority: USB Microphone
+            elif usb_candidates:
+                usb_candidates.sort(key=lambda x: x[0], reverse=True)
+                selected_info = usb_candidates[0][1]
+                selected_type = "USB"
+            # 3. Third Priority: Built-in Microphone Array
+            elif internal_candidates:
+                internal_candidates.sort(key=lambda x: x[0], reverse=True)
+                selected_info = internal_candidates[0][1]
+                selected_type = "MIC"
+            else:
+                selected_info = all_mics[0]
+                selected_type = "MIC"
+
+            self.device_id = selected_info['id']
+            self.device_name = selected_info['name']
+            self.device_type = selected_type
+            self.native_sr = selected_info['samplerate']
+            self.channels = selected_info['channels']
+            self.is_mic_connected = True
+            self._last_device_signature = tuple((m['id'], m['name']) for m in all_mics)
+            print(f"[INFO] Auto-selected {selected_type} Microphone #{self.device_id}: {self.device_name} ({selected_info.get('api', '')} @ {self.native_sr}Hz, {self.channels}ch)")
             return True
-        return False
+
+        except Exception as e:
+            print(f"[WARN] Audio input device probe skipped: {e}")
+            
+        self.device_id = None
+        self.device_name = "System Default Microphone"
+        self.device_type = "MIC"
+        self.is_mic_connected = True
+        self.native_sr = 16000
+        self.channels = 1
+        return True
+
+    def check_device_hotplug(self):
+        """Actively detects Bluetooth/USB/Hardware mic connections, removals, and auto-migrates live stream."""
+        try:
+            all_mics = self.get_available_microphones()
+            current_sig = tuple((m['id'], m['name']) for m in all_mics)
+            default_in = sd.default.device[0] if sd.default.device else None
+            
+            if self._last_device_signature is None:
+                self._last_device_signature = current_sig
+                self._last_default_device = default_in
+                return "UNCHANGED", None, None
+
+            sig_changed = (current_sig != self._last_device_signature)
+            default_changed = (getattr(self, '_last_default_device', None) != default_in)
+
+            if sig_changed or default_changed:
+                old_sig = self._last_device_signature
+                self._last_device_signature = current_sig
+                self._last_default_device = default_in
+                
+                # Check for newly attached Bluetooth or USB devices
+                bt_keywords = ['bluetooth', 'headset', 'hands-free', 'buds', 'airdopes', 'wireless', 'airpods', 'noise', 'boat', 'oneplus', 'mivi', 'realme', 'boult', 'jbl', 'sony', 'bose', 'sennheiser', 'jabber']
+                
+                # Check if current device is still present and valid
+                active_still_present = any(m['id'] == self.device_id for m in all_mics) if self.device_id is not None else False
+                
+                # If currently NOT using Bluetooth, and a Bluetooth device is present or newly connected:
+                bt_mics = [m for m in all_mics if not m.get('is_virtual', False) and any(k in m['name'].lower() for k in bt_keywords)]
+                
+                if bt_mics and self.device_type != "BT":
+                    # Dynamic adaptation: User connected Bluetooth headset! Auto-switch immediately!
+                    old_name = self.device_name
+                    was_rec = self.is_recording
+                    if was_rec:
+                        self.stop()
+                    
+                    self.probe_microphone()
+                    if was_rec:
+                        self.start()
+                    print(f"[HOTPLUG] Dynamic Adaptation: Switched to Bluetooth Headset #{self.device_id} ({self.device_name})")
+                    return "BLUETOOTH_CONNECTED", old_name, self.device_name
+
+                if not active_still_present:
+                    # Current mic was disconnected (e.g. Bluetooth turned off / USB unplugged)
+                    old_name = self.device_name
+                    was_rec = self.is_recording
+                    if was_rec:
+                        self.stop()
+                    
+                    success = self.probe_microphone()
+                    if success and was_rec:
+                        self.start()
+                    
+                    if success and self.device_name and self.device_name not in ["No Input Device Detected", ""]:
+                        print(f"[HOTPLUG] Device Disconnected ({old_name})! Auto-switched to: {self.device_name}")
+                        return "SWITCHED", old_name, self.device_name
+                    else:
+                        self.device_id = None
+                        self.device_name = "No Input Device Detected"
+                        self.device_type = "NONE"
+                        self.is_mic_connected = False
+                        print(f"[HOTPLUG] Device Disconnected ({old_name})! No input devices available.")
+                        return "DISCONNECTED", old_name, None
+
+                return "UPDATED", None, self.device_name
+        except Exception as e:
+            pass
+        return "UNCHANGED", None, None
 
     def fast_process_and_resample(self, raw_bytes):
-        """Vectorized stereo-to-mono downmixing and audio buffer resampling to 16kHz."""
+        """Vectorized stereo-to-mono downmixing and continuous audio resampling to 16kHz."""
         pcm = np.frombuffer(raw_bytes, dtype=np.int16)
-        if len(pcm) == 0:
+        n = len(pcm)
+        if n == 0:
             return b""
 
+        # Downmix multi-channel to mono
         if self.channels > 1:
-            pcm = pcm.reshape(-1, self.channels)
-            pcm_mono = np.mean(pcm, axis=1).astype(np.int16)
+            try:
+                # Slicing is faster and handles odd lengths cleanly without throwing reshape errors
+                pcm_mono = (pcm[0::self.channels].astype(np.int32) + pcm[1::self.channels].astype(np.int32)) >> 1
+                pcm_mono = pcm_mono.astype(np.int16)
+            except Exception:
+                pcm_mono = pcm[0::self.channels]
         else:
             pcm_mono = pcm
 
@@ -467,23 +863,20 @@ class VoiceSpeechEngine:
         if n_targ == 0:
             return b""
 
-        pair = (n_orig, n_targ)
-        if self._last_sr_pair != pair:
-            self._x_orig_cache = np.linspace(0, 1, n_orig, dtype=np.float32)
-            self._x_targ_cache = np.linspace(0, 1, n_targ, dtype=np.float32)
-            self._last_sr_pair = pair
-
-        audio_float = pcm_mono.astype(np.float32)
-        resampled_float = np.interp(self._x_targ_cache, self._x_orig_cache, audio_float)
-        return np.clip(resampled_float, -32768, 32767).astype(np.int16).tobytes()
+        # Linear interpolation to 16kHz
+        x_orig = np.linspace(0, 1, n_orig, dtype=np.float32)
+        x_targ = np.linspace(0, 1, n_targ, dtype=np.float32)
+        resampled = np.interp(x_targ, x_orig, pcm_mono.astype(np.float32))
+        return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     def vosk_instant_worker_loop(self):
-        """Dedicated sub-10ms local Vosk worker thread for lightning-fast keyword detection."""
+        """Dedicated sub-10ms local Vosk worker thread for lightning-fast keyword & command detection."""
         while self.is_running:
             if self.is_recording and self.vosk_recognizer:
                 try:
                     data = self.audio_queue.get(timeout=0.01)
                     if data:
+                        text = ""
                         if self.vosk_recognizer.AcceptWaveform(data):
                             res = json.loads(self.vosk_recognizer.Result())
                             text = res.get("text", "").strip()
@@ -492,95 +885,120 @@ class VoiceSpeechEngine:
                             text = pres.get("partial", "").strip()
 
                         if text:
-                            kw, slide_idx = self.match_speech_to_keyword(text)
+                            kw, target = self.match_speech_to_keyword(text)
                             now = time.time()
-                            if kw is not None and (kw != self.last_matched_keyword or now - getattr(self, 'last_match_time', 0) > 0.8):
+                            if target is not None and (target != getattr(self, 'last_matched_target', None) or now - getattr(self, 'last_match_time', 0) > 0.9):
+                                self.last_matched_target = target
                                 self.last_matched_keyword = kw
-                                self.last_matched_slide = slide_idx
                                 self.last_match_time = now
-                                self.on_keyword_matched_cb(slide_idx, kw, text)
+                                self.on_keyword_matched_cb(target, kw, text)
+                                # Reset recognizer buffer immediately upon matching to avoid duplicate triggers
+                                try:
+                                    self.vosk_recognizer.Reset()
+                                except Exception:
+                                    pass
                 except queue.Empty:
                     pass
             else:
                 time.sleep(0.01)
 
     def audio_callback(self, indata, frames, time_info, status):
-        """Real-time microphone input callback (<1ms latency)."""
+        """Real-time microphone input callback (<0.5ms latency). Direct NumPy array processing."""
         t0 = time.perf_counter()
-        audio_bytes = bytes(indata)
-        audio_data = np.frombuffer(indata, dtype=np.int16)
         
-        if len(audio_data) > 0:
-            rms = float(np.sqrt(np.mean(audio_data.astype(np.float32) ** 2)))
-            self.audio_level = min(1.0, rms / 600.0)
+        # Downmix multi-channel to mono
+        if indata.ndim > 1 and indata.shape[1] > 1:
+            pcm_mono = (indata[:, 0].astype(np.int32) + indata[:, 1].astype(np.int32)) >> 1
+            pcm_mono = pcm_mono.astype(np.int16)
+        else:
+            pcm_mono = indata[:, 0] if indata.ndim > 1 else indata
+
+        n = len(pcm_mono)
+        if n > 0:
+            # Sensitive RMS calculation for lively VU meter
+            rms = float(np.sqrt(np.mean(pcm_mono.astype(np.int32) ** 2)))
+            # Highly responsive scaling: reacts noticeably to voice whispers & normal speech
+            self.audio_level = min(1.0, max(0.0, rms / 75.0))
 
             if self.is_recording:
-                # Sub-10ms local Vosk queue feeding
-                processed_bytes = self.fast_process_and_resample(audio_bytes)
-                if processed_bytes:
-                    try:
-                        self.audio_queue.put_nowait(processed_bytes)
-                    except queue.Full:
-                        pass
-
-                # VAD buffer for Neural API backup
-                self.current_vad_buffer.extend(audio_bytes)
-                if rms > 30.0:
-                    self.speech_frames += 1
-                    self.silence_frames = 0
+                # Continuous linear resampling to 16kHz for Vosk
+                if self.native_sr == 16000:
+                    raw_16k = pcm_mono.tobytes()
                 else:
-                    self.silence_frames += 1
+                    n_orig = len(pcm_mono)
+                    n_targ = int(n_orig * 16000 / self.native_sr)
+                    if n_targ > 0:
+                        x_orig = np.linspace(0, 1, n_orig, dtype=np.float32)
+                        x_targ = np.linspace(0, 1, n_targ, dtype=np.float32)
+                        raw_16k = np.clip(np.interp(x_targ, x_orig, pcm_mono.astype(np.float32)), -32768, 32767).astype(np.int16).tobytes()
+                    else:
+                        raw_16k = None
 
-                if (self.speech_frames > 2 and self.silence_frames > 3) or len(self.current_vad_buffer) > int(self.native_sr * 2 * 2.0 * self.channels):
-                    speech_chunk = bytes(self.current_vad_buffer)
-                    self.current_vad_buffer = bytearray()
-                    self.speech_frames = 0
-                    self.silence_frames = 0
+                if raw_16k:
                     try:
-                        self.speech_chunks_queue.put_nowait(speech_chunk)
+                        self.audio_queue.put_nowait(raw_16k)
                     except queue.Full:
                         pass
 
         self.latency_ms = (time.perf_counter() - t0) * 1000.0
 
     def match_speech_to_keyword(self, spoken_text):
-        """Fuzzy matches spoken text against slide keywords (<10ms matching time)."""
-        if not spoken_text or not self.keywords_map:
+        """Comprehensive natural voice command & slide keyword parser."""
+        if not spoken_text:
             return None, None
 
-        # Clean punctuation and normalize whitespace
-        clean_text = re.sub(r'[^\w\s]', ' ', spoken_text.lower()).strip()
-        clean_text = " ".join(clean_text.split())
+        clean_text = _RE_PUNCT.sub(' ', spoken_text.lower()).strip()
+        clean_text = ' '.join(clean_text.split())
         if not clean_text:
             return None, None
 
-        # 1. Exact match on full spoken text
-        if clean_text in self.keywords_map:
-            return clean_text, self.keywords_map[clean_text]
+        # 1. Global Navigation Voice Commands (Next, Previous, First, Last, Blackout, Whiteout)
+        for pat, action in NAV_COMMAND_PATTERNS:
+            m = pat.search(clean_text)
+            if m:
+                return m.group(0), action
 
-        # Sort all active keywords by length descending so longer phrases match first
-        sorted_kws = sorted(self.keywords_map.keys(), key=lambda k: len(k), reverse=True)
+        # 2. Number Pattern Matching ("slide two", "slide 2", "second slide", "page 3", "slide to")
+        total_slides = getattr(self, '_total_slides_count', len(self.keywords_map))
+        
+        m1 = SLIDE_NUM_REGEX_1.search(clean_text)
+        if m1:
+            word = m1.group(1)
+            if word in NUMBER_MAP:
+                s_num = NUMBER_MAP[word]
+                if 1 <= s_num <= total_slides:
+                    return m1.group(0), s_num - 1
 
-        # 2. Exact word-boundary phrase match within spoken text
-        for kw in sorted_kws:
-            pattern = r'\b' + re.escape(kw) + r'\b'
-            if re.search(pattern, clean_text):
-                return kw, self.keywords_map[kw]
+        m2 = SLIDE_NUM_REGEX_2.search(clean_text)
+        if m2:
+            word = m2.group(1)
+            if word in NUMBER_MAP:
+                s_num = NUMBER_MAP[word]
+                if 1 <= s_num <= total_slides:
+                    return m2.group(0), s_num - 1
 
-        # 3. Individual word exact match
+        # 3. Exact match on full spoken text
+        km = self.keywords_map
+        if clean_text in km:
+            return clean_text, km[clean_text]
+
+        # 4. Pre-compiled regex match for slide keywords
+        for kw in self._sorted_keywords:
+            if kw in self._keyword_patterns and self._keyword_patterns[kw].search(clean_text):
+                return kw, km[kw]
+
+        # 5. Individual word match
         words = clean_text.split()
         for w in words:
-            if w in self.keywords_map:
-                return w, self.keywords_map[w]
+            if w in km:
+                return w, km[w]
 
-        # 4. Fuzzy string matching for single words (typos/mispronunciations)
-        all_kws = list(self.keywords_map.keys())
+        # 6. Fuzzy matching using keyword list
         for w in words:
             if len(w) >= 3:
-                matches = difflib.get_close_matches(w, all_kws, n=1, cutoff=0.75)
+                matches = difflib.get_close_matches(w, self._all_keywords_list, n=1, cutoff=0.78)
                 if matches:
-                    matched_kw = matches[0]
-                    return matched_kw, self.keywords_map[matched_kw]
+                    return matches[0], km[matches[0]]
 
         return None, None
 
@@ -645,33 +1063,108 @@ class VoiceSpeechEngine:
         return f"{rec_sym}   [{vu_bar}] [{fps:4.1f} FPS | {self.latency_ms:.1f}ms | {elapsed:05.1f}s]"
 
     def start(self):
-        """Starts live speech recognition stream."""
-        if self.is_recording:
-            return
-        if not self.device_name:
-            self.probe_microphone()
+        """Starts real-time live speech recognition stream with guaranteed multi-device fallback."""
+        if self.is_recording and self.stream and self.stream.active:
+            return True
+
+        self.stop()
         self.start_time = time.time()
-        self.is_recording = True
+
+        all_devices = self.get_available_microphones()
         
-        block_size = int(self.native_sr * 0.05)
-        self.stream = sd.RawInputStream(
-            samplerate=self.native_sr,
-            blocksize=block_size,
-            device=self.device_id,
-            dtype='int16',
-            channels=self.channels,
-            callback=self.audio_callback
-        )
-        self.stream.start()
-        threading.Thread(target=self.vosk_instant_worker_loop, daemon=True).start()
-        threading.Thread(target=self.neural_worker_loop, daemon=True).start()
+        # Build device trial list in priority order
+        device_attempts = []
+        if self.device_id is not None:
+            device_attempts.append(self.device_id)
+            
+        for m in all_devices:
+            if not m.get('is_virtual', False) and m['id'] not in device_attempts:
+                device_attempts.append(m['id'])
+                
+        # Always append system default as final guaranteed fallback
+        device_attempts.append(None)
+
+        stream_started = False
+        active_device_name = ""
+
+        for dev_target in device_attempts:
+            if dev_target is not None:
+                # Find device info
+                dev_info = next((m for m in all_devices if m['id'] == dev_target), None)
+                if dev_info:
+                    native_sr = dev_info.get('samplerate', 44100)
+                    ch_trials = [min(dev_info.get('channels', 1), 2), 1]
+                    dev_name = dev_info.get('name', f'Mic #{dev_target}')
+                else:
+                    native_sr = 44100
+                    ch_trials = [2, 1]
+                    dev_name = f'Mic #{dev_target}'
+                sr_trials = [native_sr, 16000, 44100, 48000, 8000]
+            else:
+                sr_trials = [16000, 44100, 48000, 8000]
+                ch_trials = [1, 2]
+                dev_name = "System Default Microphone"
+
+            for test_sr in sr_trials:
+                for test_ch in ch_trials:
+                    try:
+                        self.stream = sd.InputStream(
+                            samplerate=test_sr,
+                            device=dev_target,
+                            channels=test_ch,
+                            dtype='int16',
+                            callback=self.audio_callback
+                        )
+                        self.stream.start()
+                        if self.stream.active:
+                            self.device_id = dev_target
+                            self.device_name = dev_name
+                            self.native_sr = test_sr
+                            self.channels = test_ch
+                            stream_started = True
+                            active_device_name = dev_name
+                            print(f"[SUCCESS] Audio Stream Live on #{dev_target} ({dev_name}) @ {test_sr}Hz, {test_ch}ch")
+                            break
+                    except Exception as e:
+                        if self.stream:
+                            try:
+                                self.stream.close()
+                            except Exception:
+                                pass
+                            self.stream = None
+
+                if stream_started:
+                    break
+            if stream_started:
+                break
+
+        if stream_started:
+            self.is_recording = True
+            self.is_mic_connected = True
+            if not getattr(self, '_vosk_thread_started', False):
+                self._vosk_thread_started = True
+                threading.Thread(target=self.vosk_instant_worker_loop, daemon=True).start()
+            if not getattr(self, '_neural_thread_started', False):
+                self._neural_thread_started = True
+                threading.Thread(target=self.neural_worker_loop, daemon=True).start()
+            return True
+
+        self.is_recording = False
+        self.is_mic_connected = False
+        print(f"[ERROR] Could not initialize microphone audio stream on this machine.")
+        return False
 
     def stop(self):
-        """Stops live speech recognition stream."""
+        """Stops live speech recognition stream cleanly."""
         self.is_recording = False
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                print(f"[WARN] Exception stopping audio stream: {e}")
+            finally:
+                self.stream = None
 
 
 # ======================================================================================
@@ -718,10 +1211,13 @@ class ExternalDisplayWindow(ctk.CTkToplevel):
         self.slide_label = ctk.CTkLabel(self, text="", fg_color=COLOR_BG_BLACK)
         self.slide_label.pack(fill="both", expand=True)
         
+        self._cached_hdmi_img = None
+        self._last_hdmi_key = None
+        
         self.bind("<Escape>", lambda e: self.destroy())
 
     def update_slide(self, pil_image, is_blackout=False, is_whiteout=False):
-        """Updates slide image on external HDMI screen."""
+        """Updates slide image on external HDMI screen with zero-delay cached rendering."""
         self.is_blackout = is_blackout
         self.is_whiteout = is_whiteout
         
@@ -745,8 +1241,15 @@ class ExternalDisplayWindow(ctk.CTkToplevel):
         target_w = max(100, target_w)
         target_h = max(56, target_h)
 
-        resized_pil = pil_image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        img_key = (id(pil_image), target_w, target_h)
+        if self._last_hdmi_key == img_key and self._cached_hdmi_img is not None:
+            self.slide_label.configure(image=self._cached_hdmi_img, fg_color=COLOR_BG_BLACK, text="")
+            return
+
+        resized_pil = pil_image.resize((target_w, target_h), Image.Resampling.BILINEAR)
         ctk_img = ctk.CTkImage(light_image=resized_pil, dark_image=resized_pil, size=(target_w, target_h))
+        self._cached_hdmi_img = ctk_img
+        self._last_hdmi_key = img_key
         self.slide_label.configure(image=ctk_img, fg_color=COLOR_BG_BLACK, text="")
 
 
@@ -784,8 +1287,20 @@ class PresentationApp(ctk.CTk):
         # Auto-launch HDMI secondary window if Monitor 2 detected!
         if len(self.monitors) > 1:
             self.launch_hdmi_output(monitor_idx=1)
-            
+
+        # Check command line arguments for auto-loading PPTX (e.g. double click or drag onto exe)
+        if len(sys.argv) > 1:
+            target_pptx = sys.argv[1]
+            if os.path.exists(target_pptx) and target_pptx.lower().endswith(('.pptx', '.ppt')):
+                try:
+                    if self.slide_mgr.load_pptx(target_pptx):
+                        self.current_slide_idx = 0
+                        self.voice_engine.set_keywords(self.slide_mgr.slides)
+                except Exception as e:
+                    print(f"[WARN] Failed to auto-load command line PPTX {target_pptx}: {e}")
+
         self.update_slide_display()
+        self.update_microphone_indicator()
         self.start_gui_live_indicator_loop()
     def setup_keyboard_shortcuts(self):
         """Global keyboard shortcut bindings using bind_all for 100% guaranteed Arrow Key Navigation."""
@@ -832,33 +1347,59 @@ class PresentationApp(ctk.CTk):
     def build_gui_with_left_sidebar(self):
         """Constructs Responsive Main Window with Flex Left Sidebar & Auto-Sizing Buttons."""
         
-        # 1. TOP HEADER STATUS BAR (RESPONSIVE FLEX)
-        self.header_frame = ctk.CTkFrame(self, fg_color=COLOR_BG_CARD, corner_radius=0, height=60, border_width=1, border_color=COLOR_BORDER)
+        # 1. TOP HEADER STATUS BAR (PIXEL-PERFECT ALIGNED FLEX HEADER)
+        self.header_frame = ctk.CTkFrame(self, fg_color=COLOR_BG_CARD, corner_radius=0, height=56, border_width=1, border_color=COLOR_BORDER)
         self.header_frame.pack(side="top", fill="x")
+        self.header_frame.pack_propagate(False)
         
-        self.title_lbl = ctk.CTkLabel(self.header_frame, text="⚡ PPT ENGINE", font=ctk.CTkFont(size=15, weight="bold"), text_color=COLOR_SAPPHIRE)
-        self.title_lbl.pack(side="left", padx=(15, 10))
-        
+        # Left Container: Title + Live VU Meter + Mic Badge + Match Status
+        header_left_box = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        header_left_box.pack(side="left", fill="y", padx=(15, 5))
+
+        self.title_lbl = ctk.CTkLabel(
+            header_left_box,
+            text="⚡ PPT ENGINE",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLOR_SAPPHIRE
+        )
+        self.title_lbl.pack(side="left", padx=(0, 10))
+
+        # Divider
+        ctk.CTkLabel(header_left_box, text="|", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_BORDER).pack(side="left", padx=(0, 10))
+
         # LIVE SPEECH VU METER STATUS BAR
         self.speech_status_lbl = ctk.CTkLabel(
-            self.header_frame,
-            text="🔴 LIVE   [░░░░░░░░░░░░] [60.0 FPS | 0.0ms | 000.0s]",
-            font=ctk.CTkFont(family="Consolas", size=13, weight="bold"),
+            header_left_box,
+            text="🔴 OFF   [░░░░░░░░░░░░] [60.0 FPS | 0.0ms | 000.0s]",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
             text_color=COLOR_ACCENT_GREEN
         )
-        self.speech_status_lbl.pack(side="left", padx=10)
+        self.speech_status_lbl.pack(side="left", padx=(0, 10))
+
+        # ACTUAL MICROPHONE INPUT DEVICE BADGE (Top Header Center Indicator)
+        self.mic_status_badge = ctk.CTkLabel(
+            header_left_box,
+            text="🎙️ Mic: Detecting Device...",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#064E3B",
+            text_color="#34D399",
+            corner_radius=6,
+            padx=10,
+            pady=4
+        )
+        self.mic_status_badge.pack(side="left", padx=(0, 10))
 
         self.match_badge_lbl = ctk.CTkLabel(
-            self.header_frame,
+            header_left_box,
             text="[Voice Status: Idle]",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=COLOR_TEXT_MUTED
         )
         self.match_badge_lbl.pack(side="left", padx=5)
 
-        # RIGHT HEADER FLEX BUTTON CONTAINER
+        # RIGHT HEADER FLEX BUTTON CONTAINER (Pixel-Perfect Alignment)
         header_btn_box = ctk.CTkFrame(self.header_frame, fg_color="transparent")
-        header_btn_box.pack(side="right", padx=10, fill="y")
+        header_btn_box.pack(side="right", padx=(5, 15), fill="y")
 
         # PRESENT ON HDMI / PROJECTOR BUTTON
         self.present_hdmi_btn = ctk.CTkButton(
@@ -867,9 +1408,11 @@ class PresentationApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLOR_ACCENT_GREEN,
             hover_color="#059669",
+            height=36,
+            corner_radius=6,
             command=self.launch_hdmi_output
         )
-        self.present_hdmi_btn.pack(side="right", padx=5, pady=10)
+        self.present_hdmi_btn.pack(side="right", padx=(5, 0), pady=10)
 
         # START LIVE VOICE ENGINE BUTTON
         self.voice_btn = ctk.CTkButton(
@@ -878,9 +1421,11 @@ class PresentationApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLOR_SAPPHIRE,
             hover_color=COLOR_SAPPHIRE_HOVER,
+            height=36,
+            corner_radius=6,
             command=self.toggle_voice_engine
         )
-        self.voice_btn.pack(side="right", padx=5, pady=10)
+        self.voice_btn.pack(side="right", padx=(5, 5), pady=10)
 
         # 2. MAIN BODY CONTAINER (Left Sidebar + Right Content Area)
         self.body_container = ctk.CTkFrame(self, fg_color=COLOR_BG_BLACK)
@@ -924,20 +1469,19 @@ class PresentationApp(ctk.CTk):
         ctk.CTkButton(deck_btn_frame, text="+ ADD", fg_color=COLOR_ACCENT_GREEN, command=self.add_new_slide).pack(side="left", fill="x", expand=True, padx=2)
         ctk.CTkButton(deck_btn_frame, text="🗑️ DELETE", fg_color=COLOR_ACCENT_RED, command=self.delete_slide).pack(side="right", fill="x", expand=True, padx=2)
 
-        # UPLOAD OR DRAG PPT DROP ZONE CARD (Auto-Adjusting)
+        # OPEN PPT FILE BUTTON (Classic Windows File Explorer)
         upload_card = ctk.CTkFrame(self.sidebar_frame, fg_color=COLOR_BG_BLACK, corner_radius=8, border_width=1, border_color=COLOR_SAPPHIRE)
         upload_card.pack(fill="x", padx=10, pady=(4, 12))
 
         upload_btn = ctk.CTkButton(
             upload_card,
-            text="📂 UPLOAD OR DRAG PPT HERE\n(Click to Browse .PPTX)",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color="transparent",
-            hover_color=COLOR_BG_CARD,
-            text_color=COLOR_SAPPHIRE,
+            text="📂 OPEN PPT FILE",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_SAPPHIRE,
+            hover_color=COLOR_SAPPHIRE_HOVER,
             command=self.open_pptx_file
         )
-        upload_btn.pack(fill="both", expand=True, padx=5, pady=8)
+        upload_btn.pack(fill="x", padx=8, pady=8)
 
         # 4. RIGHT CONTENT WORK AREA (AUTO-EXPANDING)
         self.content_area = ctk.CTkFrame(self.body_container, fg_color=COLOR_BG_BLACK)
@@ -948,20 +1492,36 @@ class PresentationApp(ctk.CTk):
         self.build_keywords_view()
         self.build_settings_view()
 
+        self.sidebar_buttons = []
         self.refresh_sidebar_slide_list()
         self.switch_view("dashboard")
 
     def refresh_sidebar_slide_list(self):
-        """Refreshes the Slide Deck List on the Left Sidebar."""
+        """Ultra-fast sidebar update: reuses existing button widgets when possible."""
+        num_slides = len(self.slide_mgr.slides)
+        
+        # Fast path: update colors/labels of existing buttons without destroying widgets
+        if hasattr(self, 'sidebar_buttons') and len(self.sidebar_buttons) == num_slides:
+            for idx, (btn, slide) in enumerate(zip(self.sidebar_buttons, self.slide_mgr.slides)):
+                is_active = (idx == self.current_slide_idx)
+                btn_color = COLOR_SAPPHIRE if is_active else COLOR_BG_CARD
+                lbl_str = f"#{slide.slide_id}: {slide.title[:20]}"
+                btn.configure(
+                    text=lbl_str,
+                    fg_color=btn_color,
+                    font=ctk.CTkFont(size=11, weight="bold" if is_active else "normal")
+                )
+            return
+
+        # Rebuild path (when slides added/deleted/loaded)
         for child in self.slide_list_scroll.winfo_children():
             child.destroy()
 
-        f_side_btn = 11
+        self.sidebar_buttons = []
 
         for idx, slide in enumerate(self.slide_mgr.slides):
             is_active = (idx == self.current_slide_idx)
             btn_color = COLOR_SAPPHIRE if is_active else COLOR_BG_CARD
-            
             lbl_str = f"#{slide.slide_id}: {slide.title[:20]}"
             btn = ctk.CTkButton(
                 self.slide_list_scroll,
@@ -973,6 +1533,7 @@ class PresentationApp(ctk.CTk):
                 command=lambda i=idx: self.select_slide_by_index(i)
             )
             btn.pack(fill="x", pady=2)
+            self.sidebar_buttons.append(btn)
 
     def select_slide_by_index(self, idx):
         """Selects a slide from the Left Sidebar list."""
@@ -1066,21 +1627,56 @@ class PresentationApp(ctk.CTk):
         self.curr_slide_img_lbl = ctk.CTkLabel(self.dash_left_frame, text="")
         self.curr_slide_img_lbl.pack(fill="both", expand=True, padx=12, pady=4)
 
-        # Bottom Navigation Controls Bar
-        ctrl_frame = ctk.CTkFrame(self.dash_left_frame, fg_color="transparent")
+        # Bottom Navigation Controls Bar (Pixel-Perfect Aligned)
+        ctrl_frame = ctk.CTkFrame(self.dash_left_frame, fg_color="transparent", height=44)
         ctrl_frame.pack(fill="x", padx=12, pady=12)
 
-        self.prev_btn = ctk.CTkButton(ctrl_frame, text="◄ PREV (←)", fg_color=COLOR_SAPPHIRE, command=self.prev_slide)
-        self.prev_btn.pack(side="left", fill="x", expand=True, padx=4)
+        self.prev_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="◄ PREV (←)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_SAPPHIRE,
+            hover_color=COLOR_SAPPHIRE_HOVER,
+            width=110,
+            height=36,
+            corner_radius=6,
+            command=self.prev_slide
+        )
+        self.prev_btn.pack(side="left", padx=(0, 6))
 
-        self.next_btn = ctk.CTkButton(ctrl_frame, text="NEXT (→) ►", fg_color=COLOR_SAPPHIRE, command=self.next_slide)
-        self.next_btn.pack(side="left", fill="x", expand=True, padx=4)
+        self.next_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="NEXT (→) ►",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_SAPPHIRE,
+            hover_color=COLOR_SAPPHIRE_HOVER,
+            width=110,
+            height=36,
+            corner_radius=6,
+            command=self.next_slide
+        )
+        self.next_btn.pack(side="left", padx=(0, 12))
 
-        self.slide_scrubber = ctk.CTkSlider(ctrl_frame, from_=0, to=len(self.slide_mgr.slides)-1, number_of_steps=len(self.slide_mgr.slides), command=self.on_scrubber_change)
-        self.slide_scrubber.pack(side="left", fill="x", expand=True, padx=12)
+        self.slide_scrubber = ctk.CTkSlider(
+            ctrl_frame,
+            from_=0,
+            to=len(self.slide_mgr.slides)-1,
+            number_of_steps=len(self.slide_mgr.slides),
+            height=16,
+            progress_color=COLOR_SAPPHIRE,
+            button_color=COLOR_SAPPHIRE,
+            button_hover_color=COLOR_SAPPHIRE_HOVER,
+            command=self.on_scrubber_change
+        )
+        self.slide_scrubber.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
-        self.slide_num_lbl = ctk.CTkLabel(ctrl_frame, text="Slide 1 / 4", font=ctk.CTkFont(size=12, weight="bold"))
-        self.slide_num_lbl.pack(side="right", padx=4)
+        self.slide_num_lbl = ctk.CTkLabel(
+            ctrl_frame,
+            text="Slide 1 / 4",
+            font=ctk.CTkFont(family="Consolas", size=13, weight="bold"),
+            text_color="#E2E8F0"
+        )
+        self.slide_num_lbl.pack(side="right", padx=(4, 0))
 
     def build_editor_view(self):
         """Constructs Slide Detail Editor workspace view."""
@@ -1239,10 +1835,69 @@ class PresentationApp(ctk.CTk):
         self.focus_set()
 
     def build_settings_view(self):
-        """Constructs HDMI & Display Settings view."""
+        """Constructs Audio Microphone & HDMI Display Settings view."""
         self.view_settings_frame = ctk.CTkFrame(self.content_area, fg_color=COLOR_BG_CARD, corner_radius=8, border_width=1, border_color=COLOR_BORDER)
 
-        ctk.CTkLabel(self.view_settings_frame, text="🖥️ MULTI-MONITOR / HDMI DISPLAY DETECTOR", font=ctk.CTkFont(size=15, weight="bold"), text_color=COLOR_SAPPHIRE).pack(anchor="w", padx=20, pady=(20, 10))
+        # 1. MICROPHONE & AUDIO INPUT DEVICE CONFIGURATION
+        ctk.CTkLabel(self.view_settings_frame, text="🎙️ MICROPHONE & AUDIO INPUT CONFIGURATION", font=ctk.CTkFont(size=15, weight="bold"), text_color=COLOR_SAPPHIRE).pack(anchor="w", padx=20, pady=(20, 10))
+
+        mic_card = ctk.CTkFrame(self.view_settings_frame, fg_color=COLOR_BG_BLACK, corner_radius=6, border_width=1, border_color=COLOR_BORDER)
+        mic_card.pack(anchor="w", fill="x", padx=20, pady=(0, 15))
+
+        all_mics = self.voice_engine.get_available_microphones()
+        mic_options = []
+        mic_map = {}
+        for m in all_mics:
+            label = f"#{m['id']}: {m['name']} ({m.get('api','')})"
+            if len(label) > 65:
+                label = label[:62] + "..."
+            mic_options.append(label)
+            mic_map[label] = m['id']
+
+        curr_mic_label = "Auto-Select Best Mic"
+        for label, dev_id in mic_map.items():
+            if dev_id == self.voice_engine.device_id:
+                curr_mic_label = label
+                break
+
+        ctk.CTkLabel(mic_card, text="Active Recording Microphone:", font=ctk.CTkFont(size=12, weight="bold"), text_color="#E2E8F0").pack(anchor="w", padx=15, pady=(12, 4))
+        
+        mic_ctrl_frame = ctk.CTkFrame(mic_card, fg_color="transparent")
+        mic_ctrl_frame.pack(anchor="w", fill="x", padx=15, pady=(0, 12))
+
+        def on_mic_selected(choice):
+            chosen_id = mic_map.get(choice)
+            if chosen_id is not None:
+                was_recording = self.voice_engine.is_recording
+                if was_recording:
+                    self.voice_engine.stop()
+                self.voice_engine.probe_microphone(force_device_id=chosen_id)
+                self.update_microphone_indicator()
+                if was_recording:
+                    self.voice_engine.start()
+
+        self.mic_option_menu = ctk.CTkOptionMenu(
+            mic_ctrl_frame,
+            values=mic_options if mic_options else ["No Microphones Found"],
+            command=on_mic_selected,
+            width=480,
+            fg_color=COLOR_SAPPHIRE,
+            button_color=COLOR_SAPPHIRE_HOVER
+        )
+        if curr_mic_label in mic_options:
+            self.mic_option_menu.set(curr_mic_label)
+        self.mic_option_menu.pack(side="left", padx=(0, 10))
+
+        def refresh_mics():
+            self.voice_engine.probe_microphone()
+            self.update_microphone_indicator()
+            self.build_settings_view()
+            self.view_settings_frame.pack(fill="both", expand=True)
+
+        ctk.CTkButton(mic_ctrl_frame, text="🔄 REFRESH MICS", fg_color=COLOR_BG_BLACK, border_width=1, border_color=COLOR_SAPPHIRE, command=refresh_mics).pack(side="left")
+
+        # 2. MULTI-MONITOR / HDMI DISPLAY DETECTOR
+        ctk.CTkLabel(self.view_settings_frame, text="🖥️ MULTI-MONITOR / HDMI DISPLAY DETECTOR", font=ctk.CTkFont(size=15, weight="bold"), text_color=COLOR_SAPPHIRE).pack(anchor="w", padx=20, pady=(15, 10))
 
         mon_str = f"Detected {len(self.monitors)} Display Monitor(s) on System:\n"
         for i, m in enumerate(self.monitors):
@@ -1303,7 +1958,7 @@ class PresentationApp(ctk.CTk):
         self.focus_set()
 
     def update_slide_display(self):
-        """Renders and updates current slide on Presenter Dashboard and HDMI display using static bounds."""
+        """Renders and updates current slide on Presenter Dashboard and HDMI display with instant cached response."""
         if not self.slide_mgr.slides:
             return
 
@@ -1312,20 +1967,27 @@ class PresentationApp(ctk.CTk):
         # Static HD Slide Image Dimensions
         target_w, target_h = 640, 360
 
-        # Render HD Slide Image
+        # Render HD Slide Image (instant if cached)
         pil_img = self.slide_mgr.render_slide_image(curr_slide, width=1280, height=720)
         
-        # Update Presenter Dashboard Main Preview
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(target_w, target_h))
-        self.curr_slide_img_lbl.configure(image=ctk_img)
+        # Update Presenter Dashboard Main Preview with fast caching
+        main_key = (id(pil_img), target_w, target_h)
+        if not hasattr(self, '_last_main_key') or self._last_main_key != main_key:
+            self._cached_main_ctk = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(target_w, target_h))
+            self._last_main_key = main_key
+        self.curr_slide_img_lbl.configure(image=self._cached_main_ctk)
 
         # Static Next Slide Preview Dimensions
         next_w, next_h = 280, 158
         next_idx = (self.current_slide_idx + 1) % len(self.slide_mgr.slides)
         next_slide = self.slide_mgr.slides[next_idx]
         next_pil = self.slide_mgr.render_slide_image(next_slide, width=640, height=360)
-        next_ctk = ctk.CTkImage(light_image=next_pil, dark_image=next_pil, size=(next_w, next_h))
-        self.next_slide_img_lbl.configure(image=next_ctk)
+        
+        next_key = (id(next_pil), next_w, next_h)
+        if not hasattr(self, '_last_next_key') or self._last_next_key != next_key:
+            self._cached_next_ctk = ctk.CTkImage(light_image=next_pil, dark_image=next_pil, size=(next_w, next_h))
+            self._last_next_key = next_key
+        self.next_slide_img_lbl.configure(image=self._cached_next_ctk)
 
         # 5. Update Speaker Notes
         self.notes_textbox.delete("1.0", "end")
@@ -1392,17 +2054,54 @@ class PresentationApp(ctk.CTk):
         self.save_all_keywords()
         if not self.voice_engine.is_recording:
             self.voice_engine.set_keywords(self.slide_mgr.slides)
-            self.voice_engine.start()
-            self.voice_btn.configure(text="⏹️ STOP VOICE", fg_color=COLOR_ACCENT_RED)
-            self.match_badge_lbl.configure(text="[Voice Status: LIVE LISTENING]", text_color=COLOR_ACCENT_GREEN)
+            success = self.voice_engine.start()
+            if success:
+                self.voice_btn.configure(text="⏹️ STOP VOICE", fg_color=COLOR_ACCENT_RED)
+                self.match_badge_lbl.configure(text="[Voice Status: LIVE LISTENING]", text_color=COLOR_ACCENT_GREEN)
+            else:
+                from tkinter import messagebox
+                self.voice_btn.configure(text="🎙️ LIVE VOICE", fg_color=COLOR_SAPPHIRE)
+                self.match_badge_lbl.configure(text="[Voice Status: Mic Error]", text_color=COLOR_ACCENT_RED)
+                messagebox.showwarning(
+                    "Microphone Stream Warning",
+                    "Could not open microphone audio stream on this system.\nPlease check your microphone hardware connection or permissions.\nManual keyboard & UI navigation remain 100% active."
+                )
         else:
             self.voice_engine.stop()
             self.voice_btn.configure(text="🎙️ LIVE VOICE", fg_color=COLOR_SAPPHIRE)
             self.match_badge_lbl.configure(text="[Voice Status: Paused]", text_color=COLOR_TEXT_MUTED)
         self.focus_set()
 
-    def on_voice_keyword_matched(self, slide_idx, matched_kw, full_spoken_text):
-        """Callback triggered when speech engine matches a slide keyword in real time!"""
+    def on_voice_keyword_matched(self, target, matched_kw, full_spoken_text):
+        """Callback triggered when speech engine matches a command or slide keyword in real time!"""
+        if isinstance(target, str):
+            # Global Action Commands
+            if target == 'ACTION_NEXT':
+                self.after(0, self.next_slide)
+                msg = f"🎙️ COMMAND: 'Next Slide' (Spoken: '{full_spoken_text}') ➔ Advanced to Slide #{self.current_slide_idx + 2}"
+            elif target == 'ACTION_PREV':
+                self.after(0, self.prev_slide)
+                msg = f"🎙️ COMMAND: 'Previous Slide' (Spoken: '{full_spoken_text}') ➔ Back to Slide #{max(1, self.current_slide_idx)}"
+            elif target == 'ACTION_FIRST':
+                self.select_slide_by_index(0)
+                msg = f"🎙️ COMMAND: 'First Slide' (Spoken: '{full_spoken_text}') ➔ Jumped to Slide #1"
+            elif target == 'ACTION_LAST':
+                last_idx = max(0, len(self.slide_mgr.slides) - 1)
+                self.select_slide_by_index(last_idx)
+                msg = f"🎙️ COMMAND: 'Last Slide' (Spoken: '{full_spoken_text}') ➔ Jumped to Slide #{last_idx + 1}"
+            elif target == 'ACTION_BLACKOUT':
+                self.after(0, self.toggle_blackout)
+                msg = f"🎙️ COMMAND: 'Blackout Screen' (Spoken: '{full_spoken_text}')"
+            elif target == 'ACTION_WHITEOUT':
+                self.after(0, self.toggle_whiteout)
+                msg = f"🎙️ COMMAND: 'Whiteout Screen' (Spoken: '{full_spoken_text}')"
+            else:
+                msg = f"🎙️ COMMAND: '{target}'"
+            self.after(0, lambda: self.match_badge_lbl.configure(text=msg, text_color=COLOR_ACCENT_GREEN))
+            return
+
+        # Direct Slide Index Jump
+        slide_idx = target
         if 0 <= slide_idx < len(self.slide_mgr.slides):
             self.current_slide_idx = slide_idx
             self.is_blackout = False
@@ -1413,14 +2112,71 @@ class PresentationApp(ctk.CTk):
             msg = f"🎙️ MATCHED: '{matched_kw}' (Spoken: '{full_spoken_text}') ➔ Jumped to Slide #{slide_idx + 1}"
             self.after(0, lambda: self.match_badge_lbl.configure(text=msg, text_color=COLOR_ACCENT_GREEN))
 
+    def update_microphone_indicator(self):
+        """Updates top header badge with dynamic Bluetooth, USB, or Built-in mic status."""
+        if hasattr(self, 'mic_status_badge') and self.mic_status_badge.winfo_exists():
+            if self.voice_engine.is_mic_connected and self.voice_engine.device_name and self.voice_engine.device_name not in ["No Input Device Detected", ""]:
+                dev_name = self.voice_engine.device_name.strip()
+                dev_type = getattr(self.voice_engine, 'device_type', 'MIC')
+                
+                # Clean up repeated driver noise while preserving full actual device identity
+                if len(dev_name) > 38:
+                    display_name = dev_name[:35] + "..."
+                else:
+                    display_name = dev_name
+
+                if dev_type == "BT":
+                    badge_prefix = "🎙️ BT Headset:"
+                elif dev_type == "USB":
+                    badge_prefix = "🎙️ USB Mic:"
+                else:
+                    badge_prefix = "🎙️ Mic:"
+
+                self.mic_status_badge.configure(
+                    text=f"{badge_prefix} {display_name}",
+                    text_color="#34D399",
+                    fg_color="#064E3B"
+                )
+            else:
+                self.mic_status_badge.configure(
+                    text="⚠️ NO MIC CONNECTED",
+                    text_color="#FCA5A5",
+                    fg_color="#7F1D1D"
+                )
+
     def start_gui_live_indicator_loop(self):
-        """Updates live GUI header status bar 60 times per second."""
+        """Updates live GUI header status bar 60 times/sec and monitors real-time microphone hot-plugging."""
+        self._hotplug_tick_counter = 0
         def ui_update():
             if self.voice_engine.is_recording:
                 indicator_str = self.voice_engine.get_status_indicator_str(fps=60.0)
                 self.speech_status_lbl.configure(text=indicator_str)
             else:
                 self.speech_status_lbl.configure(text="🔴 OFF   [░░░░░░░░░░░░] [60.0 FPS | 0.0ms | 000.0s]")
+
+            # Check microphone hotplug / disconnect events (~every 1 second = 60 ticks @ 16ms)
+            self._hotplug_tick_counter += 1
+            if self._hotplug_tick_counter >= 50:
+                self._hotplug_tick_counter = 0
+                event, old_dev, new_dev = self.voice_engine.check_device_hotplug()
+                if event == "BLUETOOTH_CONNECTED":
+                    self.update_microphone_indicator()
+                    clean_n = new_dev.split('(')[0].strip() if '(' in (new_dev or '') else (new_dev or '')
+                    self.match_badge_lbl.configure(text=f"⚡ Bluetooth Headset Connected: {clean_n}", text_color=COLOR_ACCENT_GREEN)
+                elif event == "CONNECTED":
+                    self.update_microphone_indicator()
+                    clean_n = new_dev.split('(')[0].strip() if '(' in (new_dev or '') else (new_dev or '')
+                    self.match_badge_lbl.configure(text=f"⚡ Mic Connected: {clean_n}", text_color=COLOR_ACCENT_GREEN)
+                elif event == "SWITCHED":
+                    self.update_microphone_indicator()
+                    clean_n = new_dev.split('(')[0].strip() if '(' in (new_dev or '') else (new_dev or '')
+                    self.match_badge_lbl.configure(text=f"⚠️ Switched to Mic: {clean_n}", text_color="#F59E0B")
+                elif event == "DISCONNECTED":
+                    self.update_microphone_indicator()
+                    self.match_badge_lbl.configure(text="⚠️ Microphone Disconnected!", text_color=COLOR_ACCENT_RED)
+                elif event == "UPDATED":
+                    self.update_microphone_indicator()
+
             self.after(16, ui_update)
 
         self.after(100, ui_update)
@@ -1474,6 +2230,7 @@ class PresentationApp(ctk.CTk):
             self.refresh_keywords_grid()
             self.update_slide_display()
             self.focus_set()
+
 
     def open_pptx_file(self):
         """Opens native file dialog to load .pptx deck from local system or USB drive."""
