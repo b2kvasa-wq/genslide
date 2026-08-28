@@ -992,13 +992,18 @@ class VoiceSpeechEngine:
             rms = float(np.sqrt(np.mean(pcm_mono.astype(np.int32) ** 2)))
             # Dynamic SNR background noise floor tracking
             self.noise_floor = 0.96 * getattr(self, 'noise_floor', 20.0) + 0.04 * min(rms, 60.0)
-            # Highly responsive scaling reacting to speech above background floor
+            
+            # Instant Peak Attack + Smooth Exponential Decay
             effective_level = max(0.0, rms - self.noise_floor)
-            self.audio_level = min(1.0, max(0.0, effective_level / 55.0))
+            raw_level = min(1.0, max(0.0, effective_level / 40.0))
+            if raw_level > self.audio_level:
+                self.audio_level = raw_level  # Instantaneous spike on speech!
+            else:
+                self.audio_level = self.audio_level * 0.84 + raw_level * 0.16  # Smooth decay
 
             if self.is_recording:
                 # Dynamic Acoustic Noise Gate (adaptive threshold above ambient floor)
-                adaptive_thresh = max(26.0, getattr(self, 'noise_floor', 20.0) + 14.0)
+                adaptive_thresh = max(25.0, getattr(self, 'noise_floor', 20.0) + 12.0)
                 if rms > adaptive_thresh:
                     self._quiet_frame_count = 0
                 else:
@@ -1027,7 +1032,7 @@ class VoiceSpeechEngine:
         self.latency_ms = (time.perf_counter() - t0) * 1000.0
 
     def match_speech_to_keyword(self, spoken_text, is_partial=False):
-        """Comprehensive natural voice command & slide keyword parser (Zero-Hallucination)."""
+        """Comprehensive natural voice command & slide keyword parser with millisecond response."""
         if not spoken_text:
             return None, None
 
@@ -1062,11 +1067,7 @@ class VoiceSpeechEngine:
                 if 1 <= s_num <= total_slides:
                     return m2.group(0), s_num - 1
 
-        # Partial results only match explicit high-confidence navigation/number commands
-        if is_partial:
-            return None, None
-
-        # 3. Exact full phrase match against slide keywords
+        # 3. Exact full phrase match against slide keywords (enabled for both partial and full results)
         km = self.keywords_map
         if clean_text in km:
             return clean_text, km[clean_text]
@@ -1075,6 +1076,10 @@ class VoiceSpeechEngine:
         for kw in self._sorted_keywords:
             if kw in self._keyword_patterns and self._keyword_patterns[kw].search(clean_text):
                 return kw, km[kw]
+
+        # Partial results only match complete keywords/commands, not single short fragmented tokens
+        if is_partial:
+            return None, None
 
         # 5. Discrete multi-letter word match (minimum 3 characters)
         words = clean_text.split()
@@ -1131,18 +1136,15 @@ class VoiceSpeechEngine:
                 time.sleep(0.02)
 
     def get_status_indicator_str(self, fps=60.0):
-        """Renders exact terminal-style live indicator requested by user."""
-        bars = int(self.audio_level * 12)
+        """Renders static, non-jittering fixed-width VU level meter & speech indicator."""
+        bars = int(round(self.audio_level * 12))
+        bars = max(0, min(12, bars))
         vu_bar = "█" * bars + "░" * (12 - bars)
         
-        now = time.time()
-        if now - self.last_anim_time > 0.25:
-            self.anim_idx = (self.anim_idx + 1) % len(self.rec_symbols)
-            self.last_anim_time = now
-        rec_sym = self.rec_symbols[self.anim_idx]
-        
-        elapsed = now - self.start_time if (self.start_time and self.is_recording) else 0.0
-        return f"{rec_sym}   [{vu_bar}] [{fps:4.1f} FPS | {self.latency_ms:.1f}ms | {elapsed:05.1f}s]"
+        status_tag = "🟢 LIVE" if self.is_recording else "⚪ OFF "
+        lat = min(99.9, max(0.0, self.latency_ms))
+        fps_val = min(99.9, max(0.0, fps))
+        return f"{status_tag} [{vu_bar}] [{fps_val:4.1f} FPS | {lat:4.1f}ms]"
 
     def start(self):
         """Starts real-time live speech recognition stream with guaranteed multi-device fallback."""
@@ -1459,9 +1461,11 @@ class PresentationApp(ctk.CTk):
 
         self.speech_status_lbl = ctk.CTkLabel(
             header_left_box,
-            text="🔴 OFF   [░░░░░░░░░░░░] [60.0 FPS | 0.0ms | 000.0s]",
+            text="⚪ OFF  [░░░░░░░░░░░░] [60.0 FPS |  0.0ms]",
             font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
-            text_color=COLOR_ACCENT_GREEN
+            text_color=COLOR_ACCENT_GREEN,
+            width=275,
+            anchor="w"
         )
         self.speech_status_lbl.pack(side="left", padx=(0, 8), pady=14)
 
@@ -2343,7 +2347,7 @@ class PresentationApp(ctk.CTk):
                 indicator_str = self.voice_engine.get_status_indicator_str(fps=60.0)
                 self.speech_status_lbl.configure(text=indicator_str)
             else:
-                self.speech_status_lbl.configure(text="🔴 OFF   [░░░░░░░░░░░░] [60.0 FPS | 0.0ms | 000.0s]")
+                self.speech_status_lbl.configure(text="⚪ OFF  [░░░░░░░░░░░░] [60.0 FPS |  0.0ms]")
 
             # Check microphone hotplug / disconnect events (~every 0.8 second = 48 ticks @ 16ms)
             self._hotplug_tick_counter += 1
