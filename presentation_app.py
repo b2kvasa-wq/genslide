@@ -1714,73 +1714,80 @@ class PresentationApp(ctk.CTk):
         """Constructs Presenter Dashboard view with Static Layout."""
         self.view_dashboard_frame = ctk.CTkFrame(self.content_area, fg_color="transparent")
 
-        # Right Area: Speaker Notes & KEYBOARD HOTKEYS & ACTIVE VOICE KEYWORDS CONTAINER
+        # Right Area: Upcoming Slide + Speaker Notes + FULL KEYWORD MATRIX LIST + SHORTCUT CHEAT SHEET
         self.dash_right_frame = ctk.CTkFrame(self.view_dashboard_frame, fg_color=COLOR_BG_CARD, corner_radius=8, width=340, border_width=1, border_color=COLOR_BORDER)
         self.dash_right_frame.pack(side="right", fill="both", padx=(6, 0))
         self.dash_right_frame.pack_propagate(False)
 
         # 1. UPCOMING NEXT SLIDE CARD
         self.dash_upcoming_lbl = ctk.CTkLabel(self.dash_right_frame, text="UPCOMING NEXT SLIDE", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_TEXT_MUTED)
-        self.dash_upcoming_lbl.pack(anchor="w", padx=12, pady=(10, 2))
+        self.dash_upcoming_lbl.pack(anchor="w", padx=10, pady=(8, 2))
 
         self.next_slide_img_lbl = ctk.CTkLabel(self.dash_right_frame, text="")
-        self.next_slide_img_lbl.pack(fill="x", padx=12, pady=2)
+        self.next_slide_img_lbl.pack(fill="x", padx=10, pady=2)
 
         # 2. SPEAKER NOTES PANE
         self.dash_notes_lbl = ctk.CTkLabel(self.dash_right_frame, text="SPEAKER NOTES", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_TEXT_MUTED)
-        self.dash_notes_lbl.pack(anchor="w", padx=12, pady=(6, 2))
+        self.dash_notes_lbl.pack(anchor="w", padx=10, pady=(4, 2))
 
-        self.notes_textbox = ctk.CTkTextbox(self.dash_right_frame, fg_color=COLOR_BG_BLACK, text_color=COLOR_TEXT_WHITE, font=ctk.CTkFont(size=11), height=80)
-        self.notes_textbox.pack(fill="x", padx=12, pady=(0, 6))
+        self.notes_textbox = ctk.CTkTextbox(self.dash_right_frame, fg_color=COLOR_BG_BLACK, text_color=COLOR_TEXT_WHITE, font=ctk.CTkFont(size=11), height=65)
+        self.notes_textbox.pack(fill="x", padx=10, pady=(0, 4))
 
-        # 3. ACTIVE SLIDE VOICE KEYWORDS CONTAINER (RIGHT SIDE DOWN)
-        self.dash_kw_card = ctk.CTkFrame(self.dash_right_frame, fg_color=COLOR_BG_BLACK, corner_radius=6, border_width=1, border_color=COLOR_SAPPHIRE)
-        self.dash_kw_card.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        # 3. FULL PRESENTATION KEYWORD MATRIX LIST (ROW BY ROW FOR EVERY SLIDE)
+        self.dash_kw_matrix_card = ctk.CTkFrame(self.dash_right_frame, fg_color=COLOR_BG_BLACK, corner_radius=6, border_width=1, border_color=COLOR_SAPPHIRE)
+        self.dash_kw_matrix_card.pack(fill="both", expand=True, padx=10, pady=(2, 4))
 
-        kw_header_box = ctk.CTkFrame(self.dash_kw_card, fg_color="transparent")
-        kw_header_box.pack(fill="x", padx=8, pady=(6, 2))
+        kw_hdr_box = ctk.CTkFrame(self.dash_kw_matrix_card, fg_color="transparent")
+        kw_hdr_box.pack(fill="x", padx=8, pady=(6, 2))
 
-        self.dash_kw_title_lbl = ctk.CTkLabel(
-            kw_header_box,
-            text="🏷️ ACTIVE VOICE KEYWORDS (Slide #1)",
+        ctk.CTkLabel(
+            kw_hdr_box,
+            text="🏷️ VOICE KEYWORDS (ALL SLIDES)",
             font=ctk.CTkFont(size=10, weight="bold"),
             text_color=COLOR_ACCENT_GREEN
-        )
-        self.dash_kw_title_lbl.pack(side="left")
+        ).pack(side="left")
 
-        self.dash_kw_sync_badge = ctk.CTkLabel(
-            kw_header_box,
-            text="⚡ Live Matrix",
+        ctk.CTkLabel(
+            kw_hdr_box,
+            text="⚡ Live FST",
             font=ctk.CTkFont(size=9, weight="bold"),
             text_color="#34D399",
             fg_color="#064E3B",
             corner_radius=4,
-            padx=6,
-            pady=2
-        )
-        self.dash_kw_sync_badge.pack(side="right")
+            padx=5,
+            pady=1
+        ).pack(side="right")
 
-        # Editable Keyword input for immediate matrix updates
-        self.dash_kw_entry = ctk.CTkEntry(
-            self.dash_kw_card,
-            font=ctk.CTkFont(size=11),
-            placeholder_text="e.g. welcome, intro, overview"
-        )
-        self.dash_kw_entry.pack(fill="x", padx=8, pady=(4, 4))
-        self.dash_kw_entry.bind("<KeyRelease>", lambda e: self.on_dash_keywords_edited())
-        self.dash_kw_entry.bind("<FocusOut>", lambda e: self.on_dash_keywords_edited())
+        self.dash_kw_matrix_scroll = ctk.CTkScrollableFrame(self.dash_kw_matrix_card, fg_color="transparent")
+        self.dash_kw_matrix_scroll.pack(fill="both", expand=True, padx=4, pady=(2, 4))
 
-        # Live visual keyword pill badges container
-        self.dash_kw_pills_frame = ctk.CTkScrollableFrame(self.dash_kw_card, fg_color="transparent", height=60)
-        self.dash_kw_pills_frame.pack(fill="both", expand=True, padx=4, pady=(0, 6))
+        # 4. STRUCTURED SHORTCUT KEYS & SLIDE OPERATIONS BAR
+        shortcuts_card = ctk.CTkFrame(self.dash_right_frame, fg_color=COLOR_BG_BLACK, corner_radius=6, border_width=1, border_color=COLOR_BORDER)
+        shortcuts_card.pack(fill="x", padx=10, pady=(2, 8))
 
-        # 4. KEYBOARD HOTKEYS CHEAT SHEET BAR
-        hotkey_card = ctk.CTkFrame(self.dash_right_frame, fg_color=COLOR_BG_BLACK, corner_radius=6, border_width=1, border_color=COLOR_BORDER)
-        hotkey_card.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkLabel(
+            shortcuts_card,
+            text="⌨️ SHORTCUTS & OPERATIONS",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=COLOR_SAPPHIRE
+        ).pack(anchor="w", padx=8, pady=(4, 2))
 
-        hotkey_str = "⌨️ Next: →/Space | Prev: ←/Bksp | Blackout: 'B' | Whiteout: 'W' | Exit: Esc"
-        self.hotkey_text_lbl = ctk.CTkLabel(hotkey_card, text=hotkey_str, font=ctk.CTkFont(family="Consolas", size=9), text_color="#CBD5E1")
-        self.hotkey_text_lbl.pack(fill="x", padx=6, pady=4)
+        shortcut_lines = [
+            "• Next Slide     :  →  /  Down  /  Space  /  'Next Slide'",
+            "• Prev Slide     :  ←  /  Up    /  Bksp   /  'Previous Slide'",
+            "• Jump to Slide  :  1-9 Keys    /  'Slide 1', 'Slide 2'",
+            "• Black/Whiteout :  'B' / 'W'   /  'Black screen', 'White screen'",
+            "• Exit / Stop    :  Escape (Esc)"
+        ]
+        for line in shortcut_lines:
+            ctk.CTkLabel(
+                shortcuts_card,
+                text=line,
+                font=ctk.CTkFont(family="Consolas", size=9),
+                text_color="#CBD5E1",
+                anchor="w",
+                justify="left"
+            ).pack(fill="x", padx=8, pady=0)
 
         # Left Area: Slide Previews (Flex Expanding)
         self.dash_left_frame = ctk.CTkFrame(self.view_dashboard_frame, fg_color=COLOR_BG_CARD, corner_radius=8, border_width=1, border_color=COLOR_BORDER)
@@ -1971,6 +1978,7 @@ class PresentationApp(ctk.CTk):
                 except Exception:
                     pass
             count = self.voice_engine.set_keywords(self.slide_mgr.slides)
+            self.refresh_dash_keyword_matrix()
             if hasattr(self, 'kw_sync_status_lbl') and self.kw_sync_status_lbl.winfo_exists():
                 self.kw_sync_status_lbl.configure(text=f"⚡ Syncing ({count} Active)...", text_color=COLOR_ACCENT_GREEN)
 
@@ -1988,6 +1996,7 @@ class PresentationApp(ctk.CTk):
                     pass
 
         count = self.voice_engine.set_keywords(self.slide_mgr.slides)
+        self.refresh_dash_keyword_matrix()
         num_slides = len(self.slide_mgr.slides)
         msg = f"🟢 VOICE KEYWORDS SYNCED SUCCESSFULLY! ({count} Keywords across {num_slides} Slides)"
 
@@ -2158,18 +2167,8 @@ class PresentationApp(ctk.CTk):
         self.notes_textbox.delete("1.0", "end")
         self.notes_textbox.insert("1.0", curr_slide.notes if curr_slide.notes else "(No speaker notes for this slide)")
 
-        # 5b. Update Active Voice Keywords Container (Right Side Down)
-        if hasattr(self, 'dash_kw_title_lbl') and self.dash_kw_title_lbl.winfo_exists():
-            self.dash_kw_title_lbl.configure(text=f"🏷️ ACTIVE VOICE KEYWORDS (Slide #{self.current_slide_idx + 1})")
-        if hasattr(self, 'dash_kw_entry') and self.dash_kw_entry.winfo_exists():
-            curr_kw_str = ", ".join(curr_slide.keywords)
-            try:
-                if self.focus_get() != self.dash_kw_entry:
-                    self.dash_kw_entry.delete(0, "end")
-                    self.dash_kw_entry.insert(0, curr_kw_str)
-            except Exception:
-                pass
-        self.refresh_dash_keyword_pills(curr_slide.keywords)
+        # 5b. Update Full Presentation Keyword Matrix List (Row by Row)
+        self.refresh_dash_keyword_matrix()
 
         # 6. Update Slide Number Label & Scrubber
         self.slide_num_lbl.configure(text=f"Slide {self.current_slide_idx + 1} / {len(self.slide_mgr.slides)}")
@@ -2179,65 +2178,76 @@ class PresentationApp(ctk.CTk):
         if self.hdmi_window and self.hdmi_window.winfo_exists():
             self.hdmi_window.update_slide(pil_img, is_blackout=self.is_blackout, is_whiteout=self.is_whiteout)
 
-    def on_dash_keywords_edited(self):
-        """Immediately updates the active slide's keywords and live-recompiles the Kaldi FST Keyword Matrix!"""
-        if not self.slide_mgr.slides or self.current_slide_idx >= len(self.slide_mgr.slides):
-            return
-        
-        curr_slide = self.slide_mgr.slides[self.current_slide_idx]
-        raw_text = self.dash_kw_entry.get()
-        clean_kws = [k.strip().lower() for k in raw_text.split(",") if k.strip()]
-        
-        curr_slide.keywords = clean_kws
-        
-        # Immediately recompile Kaldi FST Keyword Matrix in <1ms!
-        count = self.voice_engine.set_keywords(self.slide_mgr.slides)
-        
-        # Update live visual pill badges
-        self.refresh_dash_keyword_pills(clean_kws)
-        
-        # Update sync badge
-        if hasattr(self, 'dash_kw_sync_badge') and self.dash_kw_sync_badge.winfo_exists():
-            self.dash_kw_sync_badge.configure(text=f"✅ {len(clean_kws)} Active", fg_color="#064E3B", text_color="#34D399")
-
-    def refresh_dash_keyword_pills(self, keywords):
-        """Renders sleek visual keyword badges in the dashboard keywords container."""
-        if not hasattr(self, 'dash_kw_pills_frame') or not self.dash_kw_pills_frame.winfo_exists():
+    def refresh_dash_keyword_matrix(self):
+        """Renders row-by-row Keyword Matrix list for every slide in the presenter dashboard."""
+        if not hasattr(self, 'dash_kw_matrix_scroll') or not self.dash_kw_matrix_scroll.winfo_exists():
             return
             
-        for child in self.dash_kw_pills_frame.winfo_children():
+        for child in self.dash_kw_matrix_scroll.winfo_children():
             child.destroy()
             
-        if not keywords:
-            ctk.CTkLabel(
-                self.dash_kw_pills_frame,
-                text="(No keywords assigned. Type keywords above)",
-                font=ctk.CTkFont(size=10),
-                text_color=COLOR_TEXT_MUTED
-            ).pack(anchor="w", padx=6, pady=4)
-            return
-
-        pills_row = ctk.CTkFrame(self.dash_kw_pills_frame, fg_color="transparent")
-        pills_row.pack(fill="x", padx=2, pady=2)
-        
-        col_count = 0
-        curr_row = pills_row
-        for kw in keywords:
-            pill = ctk.CTkLabel(
-                curr_row,
-                text=f"🏷️ {kw}",
-                font=ctk.CTkFont(size=10, weight="bold"),
-                fg_color="#1E293B",
-                text_color="#93C5FD",
-                corner_radius=4,
-                padx=6,
-                pady=2
+        for idx, slide in enumerate(self.slide_mgr.slides):
+            is_active = (idx == self.current_slide_idx)
+            row_bg = "#0B132B" if is_active else "#050811"
+            border_col = COLOR_SAPPHIRE if is_active else "#1E293B"
+            
+            row_card = ctk.CTkFrame(
+                self.dash_kw_matrix_scroll,
+                fg_color=row_bg,
+                corner_radius=5,
+                border_width=1,
+                border_color=border_col
             )
-            pill.pack(side="left", padx=3, pady=2)
-            col_count += 1
-            if col_count % 3 == 0:
-                curr_row = ctk.CTkFrame(self.dash_kw_pills_frame, fg_color="transparent")
-                curr_row.pack(fill="x", padx=2, pady=2)
+            row_card.pack(fill="x", padx=2, pady=2)
+            
+            # Header line: Slide number + Title + Active indicator
+            hdr_box = ctk.CTkFrame(row_card, fg_color="transparent")
+            hdr_box.pack(fill="x", padx=6, pady=(3, 1))
+            
+            slide_tag = f"#{slide.slide_id}: {slide.title[:20]}"
+            tag_color = "#60A5FA" if is_active else "#94A3B8"
+            lbl_title = ctk.CTkLabel(
+                hdr_box,
+                text=slide_tag,
+                font=ctk.CTkFont(size=10, weight="bold" if is_active else "normal"),
+                text_color=tag_color,
+                anchor="w"
+            )
+            lbl_title.pack(side="left")
+            
+            if is_active:
+                ctk.CTkLabel(
+                    hdr_box,
+                    text="● CURRENT",
+                    font=ctk.CTkFont(size=8, weight="bold"),
+                    text_color="#34D399",
+                    fg_color="#064E3B",
+                    corner_radius=3,
+                    padx=4,
+                    pady=1
+                ).pack(side="right")
+                
+            # Keywords line
+            kws = slide.keywords if slide.keywords else ["(no keywords)"]
+            kw_str = " • ".join(kws[:5])
+            if len(slide.keywords) > 5:
+                kw_str += f" (+{len(slide.keywords)-5})"
+                
+            lbl_kws = ctk.CTkLabel(
+                row_card,
+                text=f"🗣️ {kw_str}",
+                font=ctk.CTkFont(size=9),
+                text_color="#93C5FD" if is_active else "#64748B",
+                anchor="w",
+                justify="left",
+                wraplength=290
+            )
+            lbl_kws.pack(fill="x", padx=6, pady=(0, 3))
+            
+            # Clickable row to navigate directly to slide
+            row_card.bind("<Button-1>", lambda e, i=idx: self.select_slide_by_index(i))
+            lbl_title.bind("<Button-1>", lambda e, i=idx: self.select_slide_by_index(i))
+            lbl_kws.bind("<Button-1>", lambda e, i=idx: self.select_slide_by_index(i))
 
     def next_slide(self):
         """Navigates to next slide."""
