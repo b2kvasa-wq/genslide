@@ -38,6 +38,7 @@ if getattr(sys, 'frozen', False):
         pass
 
 # Now safe to import all libraries
+import ctypes
 import time
 import json
 import queue
@@ -102,6 +103,36 @@ def get_resource_path(relative_path):
         return cwd_path
     return relative_path
 
+class WinMMAudioMonitor:
+    """Windows Multimedia ctypes helper to detect live physical audio endpoints in real time."""
+    class WAVEINCAPSW(ctypes.Structure):
+        _fields_ = [
+            ('wMid', ctypes.c_ushort),
+            ('wPid', ctypes.c_ushort),
+            ('vDriverVersion', ctypes.c_uint),
+            ('szPname', ctypes.c_wchar * 32),
+            ('dwFormats', ctypes.c_ulong),
+            ('wChannels', ctypes.c_ushort),
+            ('wReserved1', ctypes.c_ushort),
+        ]
+
+    @classmethod
+    def get_live_device_names(cls):
+        """Returns list of active physical audio input endpoints registered with Windows."""
+        dev_names = []
+        try:
+            if hasattr(ctypes, 'windll') and hasattr(ctypes.windll, 'winmm'):
+                num = ctypes.windll.winmm.waveInGetNumDevs()
+                caps = cls.WAVEINCAPSW()
+                for i in range(num):
+                    res = ctypes.windll.winmm.waveInGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps))
+                    if res == 0 and caps.szPname:
+                        dev_names.append(caps.szPname.strip())
+        except Exception:
+            pass
+        return dev_names
+
+
 class LiveSpeechRecognizer:
     def __init__(self, model_path="vosk-model-small-en-us-0.15", target_sample_rate=16000):
         self.target_sample_rate = target_sample_rate
@@ -121,16 +152,15 @@ class LiveSpeechRecognizer:
         
         self.current_partial = ""
         self.start_time = None
-        
-        self.audio_level = 0.0
-        self.raw_rms = 0.0
-        self.latency_ms = 0.0
+        self.last_audio_frame_time = 0.0
         
         self.device_id = None
         self.device_name = ""
+        self.device_type = "MIC"
         self.native_sr = 44100
         self.channels = 1
         self.session_count = 0
+        self._last_winmm_signature = None
         
         self.rec_symbols = ["🔴 LIVE", "🎙️  REC ", "⚡ STREAM", "🔴 LIVE"]
         self.anim_idx = 0
@@ -163,13 +193,34 @@ class LiveSpeechRecognizer:
         self.sr_recognizer.energy_threshold = 300
         self.sr_recognizer.dynamic_energy_threshold = True
 
-    def probe_microphones(self, verbose=True):
+    def refresh_portaudio(self):
+        """Safely re-initializes PortAudio to discover newly connected Bluetooth/USB devices."""
+        was_rec = self.is_recording
+        if self.stream:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+            
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
+
+    def probe_microphones(self, verbose=True, force_refresh=False):
         """Probes all input devices and auto-selects the active hardware microphone."""
+        if force_refresh:
+            self.refresh_portaudio()
+
         if verbose:
             print(f"{Colors.OKCYAN}[INFO] Probing hardware microphone endpoints...{Colors.ENDC}")
             
         devices = sd.query_devices()
         bt_mics = []
+        usb_mics = []
         active_hardware_mics = []
         other_mics = []
 
@@ -180,6 +231,13 @@ class LiveSpeechRecognizer:
                 ch = min(dev['max_input_channels'], 2)
                 host_api = sd.query_hostapis(dev['hostapi'])['name']
                 
+                name_lower = name.lower()
+                is_virtual = any(k in name_lower for k in ["camo", "mapper", "primary sound", "stereo mix", "speaker"])
+                is_ghost_wdm = ('wdm-ks' in host_api.lower() and ('@system32' in name_lower or 'bthhfenum' in name_lower))
+
+                if is_ghost_wdm or is_virtual:
+                    continue
+
                 amp = 0
                 try:
                     test_rec = sd.rec(int(sr_rate * 0.02), samplerate=sr_rate, channels=ch, dtype='int16', device=idx)
@@ -188,44 +246,85 @@ class LiveSpeechRecognizer:
                 except Exception:
                     pass
 
-                is_bt = any(k in name.lower() for k in ["bluetooth", "hands-free", "headset", "airpods", "buds", "wireless"])
-                is_virtual = any(k in name.lower() for k in ["camo", "mapper", "primary sound"])
+                is_bt = any(k in name_lower for k in [
+                    "bluetooth", "hands-free", "headset", "airpods", "buds", "wireless",
+                    "airdopes", "noise", "boat", "oneplus", "mivi", "realme", "boult", "jbl", "sony", "bose", "sennheiser"
+                ])
+                is_usb = any(k in name_lower for k in ["usb", "hyperx", "blue yeti", "rode", "fifine", "boya", "podcast"])
                 
-                info = (idx, name, sr_rate, ch, amp, host_api, is_bt)
+                api_score = 4 if 'wasapi' in host_api.lower() else (3 if 'directsound' in host_api.lower() else (2 if 'mme' in host_api.lower() else 1))
+                info = (idx, name, sr_rate, ch, amp, host_api, is_bt, is_usb, api_score)
 
                 if is_bt:
                     bt_mics.append(info)
-                elif amp > 50 and not is_virtual:
+                elif is_usb:
+                    usb_mics.append(info)
+                elif amp > 50:
                     active_hardware_mics.append(info)
-                elif not is_virtual:
+                else:
                     other_mics.append(info)
 
         selected = None
+        selected_type = "MIC"
+
         if bt_mics:
-            bt_mics.sort(key=lambda x: x[4], reverse=True)
+            bt_mics.sort(key=lambda x: (x[8], x[4]), reverse=True)
             selected = bt_mics[0]
+            selected_type = "BT"
             if verbose:
-                print(f"{Colors.OKGREEN}[BLUETOOTH MIC DETECTED] Using Bluetooth Headset: {selected[1]}{Colors.ENDC}")
+                print(f"{Colors.OKGREEN}[BLUETOOTH MIC DETECTED] Using Bluetooth Headset: {selected[1]} ({selected[5]}){Colors.ENDC}")
+        elif usb_mics:
+            usb_mics.sort(key=lambda x: (x[8], x[4]), reverse=True)
+            selected = usb_mics[0]
+            selected_type = "USB"
+            if verbose:
+                print(f"{Colors.OKGREEN}[USB MIC DETECTED] Using USB Microphone: {selected[1]} ({selected[5]}){Colors.ENDC}")
         elif active_hardware_mics:
-            active_hardware_mics.sort(key=lambda x: x[4], reverse=True)
+            active_hardware_mics.sort(key=lambda x: (x[8], x[4]), reverse=True)
             selected = active_hardware_mics[0]
+            selected_type = "MIC"
             if verbose:
                 print(f"{Colors.OKGREEN}[ACTIVE HARDWARE MIC] Auto-selected endpoint: #{selected[0]} {selected[1]} ({selected[5]}){Colors.ENDC}")
         elif other_mics:
             selected = other_mics[0]
+            selected_type = "MIC"
         else:
             print(f"{Colors.FAIL}[ERROR] No functional microphone endpoints found on system!{Colors.ENDC}")
             return False
 
         self.device_id = selected[0]
         self.device_name = selected[1]
+        self.device_type = selected_type
         self.native_sr = selected[2]
         self.channels = selected[3]
+        self._last_winmm_signature = tuple(WinMMAudioMonitor.get_live_device_names())
 
         if verbose:
-            bt_tag = " 🎧 [BLUETOOTH]" if selected[6] else ""
+            bt_tag = " 🎧 [BLUETOOTH]" if selected_type == "BT" else (" 🎙️ [USB]" if selected_type == "USB" else "")
             print(f"{Colors.OKGREEN}[STREAM READY] Device #{self.device_id}: {self.device_name} ({self.native_sr}Hz, {self.channels}ch){bt_tag}{Colors.ENDC}")
         return True
+
+    def check_device_hotplug(self):
+        """Monitors live audio endpoints and auto-migrates stream when Bluetooth connects/disconnects."""
+        try:
+            live_winmm = tuple(WinMMAudioMonitor.get_live_device_names())
+            if live_winmm != getattr(self, '_last_winmm_signature', None):
+                self._last_winmm_signature = live_winmm
+                was_rec = self.is_recording
+                old_name = self.device_name
+                old_type = self.device_type
+                
+                self.refresh_portaudio()
+                success = self.probe_microphones(verbose=True)
+                if success and was_rec:
+                    self.restart_stream()
+                    
+                if old_type != "BT" and self.device_type == "BT":
+                    print(f"\n{Colors.OKGREEN}{Colors.BOLD}[DYNAMIC HOTPLUG] 🎧 Bluetooth Headset Connected: {self.device_name}{Colors.ENDC}\n")
+                elif old_type == "BT" and self.device_type != "BT":
+                    print(f"\n{Colors.WARNING}{Colors.BOLD}[DYNAMIC HOTPLUG] ⚠️ Bluetooth Disconnected ➔ Switched to: {self.device_name}{Colors.ENDC}\n")
+        except Exception:
+            pass
 
     def test_microphone_levels(self):
         """Interactive test screen showing live audio input levels across all microphones."""
@@ -323,6 +422,7 @@ class LiveSpeechRecognizer:
             pass
 
         t0 = time.perf_counter()
+        self.last_audio_frame_time = time.time()
         audio_bytes = bytes(indata)
         audio_data = np.frombuffer(indata, dtype=np.int16)
         
@@ -552,8 +652,8 @@ class LiveSpeechRecognizer:
                                 self.current_partial = ""
                             print(f"{Colors.OKGREEN}[CLEARED] Screen display reset.{Colors.ENDC}\n")
                         elif key == 'b':
-                            print(f"\n{Colors.OKCYAN}Rescanning for Bluetooth microphones...{Colors.ENDC}")
-                            self.probe_microphones(verbose=True)
+                            print(f"\n{Colors.OKCYAN}Scanning and refreshing audio devices for Bluetooth / USB microphones...{Colors.ENDC}")
+                            self.probe_microphones(verbose=True, force_refresh=True)
                             self.restart_stream()
                         elif key == 't':
                             self.stream.stop()
@@ -571,6 +671,13 @@ class LiveSpeechRecognizer:
                             break
                     except Exception:
                         pass
+
+                # Check device hotplugging periodically (~1 second)
+                if not hasattr(self, '_last_hotplug_check'):
+                    self._last_hotplug_check = time.time()
+                if time.time() - self._last_hotplug_check > 1.0:
+                    self._last_hotplug_check = time.time()
+                    self.check_device_hotplug()
 
                 # 2. 60 FPS Real-time Status Bar (Line 1 Footer)
                 if self.is_recording:
