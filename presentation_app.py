@@ -210,6 +210,80 @@ class SlideData:
         return hash((self.slide_id, self.title, tuple(self.bullet_points), self.image_path, tuple(self.keywords[:6])))
 
 
+SLIDE_NUM_WORDS = {
+    1: ("one", "first"),
+    2: ("two", "second"),
+    3: ("three", "third"),
+    4: ("four", "fourth"),
+    5: ("five", "fifth"),
+    6: ("six", "sixth"),
+    7: ("seven", "seventh"),
+    8: ("eight", "eighth"),
+    9: ("nine", "ninth"),
+    10: ("ten", "tenth"),
+    11: ("eleven", "eleventh"),
+    12: ("twelve", "twelfth"),
+    13: ("thirteen", "thirteenth"),
+    14: ("fourteen", "fourteenth"),
+    15: ("fifteen", "fifteenth"),
+    16: ("sixteen", "sixteenth"),
+    17: ("seventeen", "seventeenth"),
+    18: ("eighteen", "eighteenth"),
+    19: ("nineteen", "nineteenth"),
+    20: ("twenty", "twentieth")
+}
+
+COMMON_STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "from", "into", "are", "was",
+    "were", "will", "have", "has", "had", "about", "your", "their", "which",
+    "what", "when", "where", "how", "all", "any", "both", "each", "few", "more",
+    "some", "such", "than", "then", "very", "can", "could", "should", "would"
+}
+
+def generate_default_slide_keywords(slide_num, title="", bullet_points=None):
+    """Generates rich, intelligent default voice keywords combining slide numbers/ordinals and content."""
+    keywords = []
+    
+    # 1. Slide Numbers & Ordinals (e.g. 'slide 1', 'slide one', 'first slide', 'first', 'one')
+    keywords.append(f"slide {slide_num}")
+    if slide_num in SLIDE_NUM_WORDS:
+        cardinal, ordinal = SLIDE_NUM_WORDS[slide_num]
+        keywords.append(f"slide {cardinal}")
+        keywords.append(f"{ordinal} slide")
+        keywords.append(ordinal)
+        keywords.append(cardinal)
+    keywords.append(f"page {slide_num}")
+
+    # 2. Slide Title Keywords & Meaningful Phrases
+    if title:
+        clean_title = _RE_PUNCT.sub(' ', title.lower()).strip()
+        clean_title = ' '.join(clean_title.split())
+        if clean_title and not clean_title.startswith(f"slide {slide_num}") and not clean_title.startswith("slide"):
+            if len(clean_title) <= 25:
+                keywords.append(clean_title)
+            title_words = [w for w in clean_title.split() if len(w) >= 3 and w not in COMMON_STOPWORDS]
+            keywords.extend(title_words)
+
+    # 3. Slide Content / Bullet Points Keywords
+    if bullet_points:
+        for bullet in bullet_points[:5]:
+            if bullet:
+                clean_b = _RE_PUNCT.sub(' ', str(bullet).lower()).strip()
+                words = [w for w in clean_b.split() if len(w) >= 4 and w not in COMMON_STOPWORDS]
+                keywords.extend(words[:3])
+
+    # Deduplicate while strictly preserving order
+    seen = set()
+    deduped = []
+    for kw in keywords:
+        kw_norm = kw.strip().lower()
+        if kw_norm and kw_norm not in seen:
+            seen.add(kw_norm)
+            deduped.append(kw_norm)
+
+    return deduped
+
+
 class SlideManager:
     """Handles loading, native rendering via PowerPoint COM, editing, and saving .pptx decks."""
 
@@ -232,7 +306,7 @@ class SlideManager:
                     "Built with CustomTkinter, Python-PPTX, Pillow & Vosk"
                 ],
                 notes="Welcome the audience. Introduce the key goals of real-time voice slide switching.",
-                keywords=["welcome", "introduction", "intro", "project intro", "start presentation", "overview"]
+                keywords=["slide 1", "slide one", "first slide", "first", "one", "welcome", "introduction", "intro", "project intro", "start presentation", "overview"]
             ),
             SlideData(
                 slide_id=2,
@@ -244,7 +318,7 @@ class SlideManager:
                     "Multi-Threaded Asynchronous Window Synchronizer"
                 ],
                 notes="Explain the sub-50ms pipeline. Highlight zero-latency audio callback & fuzzy matcher.",
-                keywords=["architecture", "system architecture", "pipeline", "data pipeline", "system design", "tech stack"]
+                keywords=["slide 2", "slide two", "second slide", "second", "two", "architecture", "system architecture", "pipeline", "data pipeline", "system design", "tech stack"]
             ),
             SlideData(
                 slide_id=3,
@@ -256,7 +330,7 @@ class SlideManager:
                     "Full .PPTX Deck Import, Editing, and Saving Support"
                 ],
                 notes="Demonstrate live voice switching by saying keywords naturally into the microphone.",
-                keywords=["features", "key features", "live demo", "demonstration", "capabilities"]
+                keywords=["slide 3", "slide three", "third slide", "third", "three", "features", "key features", "live demo", "demonstration", "capabilities"]
             ),
             SlideData(
                 slide_id=4,
@@ -268,7 +342,7 @@ class SlideManager:
                     "Thank You! Questions & Discussion"
                 ],
                 notes="Conclude presentation and open the floor for Q&A from the audience.",
-                keywords=["conclusion", "summary", "wrap up", "questions", "q and a", "thank you"]
+                keywords=["slide 4", "slide four", "fourth slide", "fourth", "four", "conclusion", "summary", "wrap up", "questions", "q and a", "thank you"]
             )
         ]
 
@@ -352,13 +426,8 @@ class SlideManager:
                 if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
                     notes = slide.notes_slide.notes_text_frame.text.strip()
                     
-                # Dynamic Voice Keywords adapted to slide numbers & title
-                keywords = [f"slide {slide_num}", f"page {slide_num}"]
-                if title and not title.startswith("Slide "):
-                    clean_title = _RE_PUNCT.sub(' ', title.lower()).strip()
-                    keywords.append(clean_title)
-                    title_kws = [w for w in clean_title.split() if len(w) >= 3 and w not in ["the", "and", "for", "with", "this", "that", "from", "into"]]
-                    keywords.extend(title_kws)
+                # Dynamic Voice Keywords combining slide numbers, ordinals, and content
+                keywords = generate_default_slide_keywords(slide_num, title, bullet_points)
                 
                 # Check for COM rendered 100% real PowerPoint slide image
                 com_img = com_rendered_images.get(idx, None)
@@ -369,7 +438,7 @@ class SlideManager:
                     bullet_points=bullet_points[:6],
                     notes=notes,
                     image_path=extracted_img_path,
-                    keywords=list(set(keywords)),
+                    keywords=keywords,
                     slide_image=com_img
                 ))
                 
@@ -2520,18 +2589,20 @@ class PresentationApp(ctk.CTk):
     def add_new_slide(self):
         """Adds new blank slide to deck."""
         new_id = len(self.slide_mgr.slides) + 1
+        new_kws = generate_default_slide_keywords(new_id, f"New Slide {new_id}", ["Add bullet points here"])
         new_slide = SlideData(
             slide_id=new_id,
             title=f"New Slide {new_id}",
             bullet_points=["Add bullet points here"],
             notes="Add speaker notes here",
-            keywords=[f"slide {new_id}", f"slide{new_id}"]
+            keywords=new_kws
         )
         self.slide_mgr.slides.append(new_slide)
         self.current_slide_idx = len(self.slide_mgr.slides) - 1
         self.slide_scrubber.configure(to=len(self.slide_mgr.slides)-1, number_of_steps=len(self.slide_mgr.slides))
         self.refresh_sidebar_slide_list()
         self.refresh_keywords_grid()
+        self.voice_engine.set_keywords(self.slide_mgr.slides)
         self.update_slide_display()
         self.focus_set()
 
