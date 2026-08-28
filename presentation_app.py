@@ -1008,6 +1008,7 @@ class VoiceSpeechEngine:
                 try:
                     data = self.audio_queue.get(timeout=0.01)
                     if data:
+                        t_proc0 = time.perf_counter()
                         text = ""
                         is_partial = False
                         if self.vosk_recognizer.AcceptWaveform(data):
@@ -1030,7 +1031,6 @@ class VoiceSpeechEngine:
                                 # Reset recognizer buffer immediately upon matching to avoid duplicate triggers
                                 try:
                                     self.vosk_recognizer.Reset()
-                                    # Clear stale audio frames after match
                                     while not self.audio_queue.empty():
                                         try:
                                             self.audio_queue.get_nowait()
@@ -1038,6 +1038,9 @@ class VoiceSpeechEngine:
                                             break
                                 except Exception:
                                     pass
+
+                        proc_ms = (time.perf_counter() - t_proc0) * 1000.0
+                        self.latency_ms = 0.82 * getattr(self, 'latency_ms', 1.0) + 0.18 * max(0.5, proc_ms)
                 except queue.Empty:
                     pass
             else:
@@ -1204,16 +1207,42 @@ class VoiceSpeechEngine:
             else:
                 time.sleep(0.02)
 
-    def get_status_indicator_str(self, fps=60.0):
-        """Renders static, non-jittering fixed-width VU level meter & speech indicator."""
+    def get_status_indicator_info(self, fps=60.0):
+        """Returns (indicator_str, color_hex) reflecting voice energy spikes and red clip/noise warning."""
+        if not self.is_recording:
+            vu_bar = "░" * 12
+            fps_val = min(99.9, max(0.0, fps))
+            lat = 0.0
+            return f"⚪ OFF  [{vu_bar}] [{fps_val:4.1f} FPS | {lat:4.1f}ms]", "#64748B"
+
         bars = int(round(self.audio_level * 12))
         bars = max(0, min(12, bars))
         vu_bar = "█" * bars + "░" * (12 - bars)
         
-        status_tag = "🟢 LIVE" if self.is_recording else "⚪ OFF "
         lat = min(99.9, max(0.0, self.latency_ms))
         fps_val = min(99.9, max(0.0, fps))
-        return f"{status_tag} [{vu_bar}] [{fps_val:4.1f} FPS | {lat:4.1f}ms]"
+
+        # Dynamic Audio Level Color & Noise Warning
+        if self.audio_level >= 0.80:
+            # Sound level too high / loud noise clipping / shouting
+            status_tag = "🔴 NOISE"
+            text_color = "#EF4444"  # Warning Red
+        elif self.audio_level >= 0.35:
+            # Active elevated speech
+            status_tag = "🟡 LIVE "
+            text_color = "#FBBF24"  # Amber
+        else:
+            # Normal clear / quiet speech
+            status_tag = "🟢 LIVE "
+            text_color = "#34D399"  # Emerald Green
+
+        indicator_str = f"{status_tag} [{vu_bar}] [{fps_val:4.1f} FPS | {lat:4.1f}ms]"
+        return indicator_str, text_color
+
+    def get_status_indicator_str(self, fps=60.0):
+        """Renders static, non-jittering fixed-width VU level meter & speech indicator."""
+        s, _ = self.get_status_indicator_info(fps=fps)
+        return s
 
     def start(self):
         """Starts real-time live speech recognition stream with guaranteed multi-device fallback."""
@@ -2525,14 +2554,25 @@ class PresentationApp(ctk.CTk):
         self.refresh_mic_dropdown()
 
     def start_gui_live_indicator_loop(self):
-        """Updates live GUI header status bar 60 times/sec and monitors real-time microphone hot-plugging."""
+        """Updates live GUI header status bar 60 times/sec with real measured FPS, true DSP ms, and dynamic noise color."""
         self._hotplug_tick_counter = 0
+        self._last_fps_time = time.perf_counter()
+        self._frame_counter = 0
+        self._measured_fps = 60.0
+        self._fps_accumulator_time = time.perf_counter()
+
         def ui_update():
-            if self.voice_engine.is_recording:
-                indicator_str = self.voice_engine.get_status_indicator_str(fps=60.0)
-                self.speech_status_lbl.configure(text=indicator_str)
-            else:
-                self.speech_status_lbl.configure(text="⚪ OFF  [░░░░░░░░░░░░] [60.0 FPS |  0.0ms]")
+            now = time.perf_counter()
+            self._frame_counter += 1
+            elapsed_acc = now - self._fps_accumulator_time
+            if elapsed_acc >= 0.20:
+                calc_fps = self._frame_counter / elapsed_acc
+                self._measured_fps = 0.85 * self._measured_fps + 0.15 * calc_fps
+                self._frame_counter = 0
+                self._fps_accumulator_time = now
+
+            indicator_str, text_col = self.voice_engine.get_status_indicator_info(fps=self._measured_fps)
+            self.speech_status_lbl.configure(text=indicator_str, text_color=text_col)
 
             # Check microphone hotplug / disconnect events (~every 0.8 second = 48 ticks @ 16ms)
             self._hotplug_tick_counter += 1
